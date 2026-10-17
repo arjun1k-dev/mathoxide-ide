@@ -8,4 +8,7 @@ license.workspace = true
 mo-core = { workspace = true }
 mo-render = { workspace = true }
 winit = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
 anyhow = { workspace = true }
+pollster = "0.4"

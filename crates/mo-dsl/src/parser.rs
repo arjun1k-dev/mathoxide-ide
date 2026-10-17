@@ -95,7 +95,23 @@ impl<'a> Lexer<'a> {
         self.skip_ws_and_comments();
         let (line, col) = (self.line, self.col);
         let Some(c) = self.peek() else { return Ok(None) };
-        let tok = if c.is_ascii_alphabetic() || c == b'_' {
+        let tok = if c == b'-'
+            && self
+                .peek2()
+                .is_some_and(|d| d.is_ascii_digit() || d == b'.')
+        {
+            self.bump();
+            let mut s = String::from("-");
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() || c == b'.' {
+                    s.push(c as char);
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            Tok::Num(s.parse().map_err(|_| Diag { line, col, message: format!("bad number `{s}`") })?)
+        } else if c.is_ascii_alphabetic() || c == b'_' {
             let mut s = String::new();
             while let Some(c) = self.peek() {
                 if c.is_ascii_alphanumeric() || c == b'_' {

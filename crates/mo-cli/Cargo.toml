@@ -13,6 +13,7 @@ mo-core = { workspace = true }
 mo-render = { workspace = true }
 mo-dsl = { workspace = true }
 mo-moab = { workspace = true }
+mo-interactive = { path = "../mo-interactive" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 image = { workspace = true }

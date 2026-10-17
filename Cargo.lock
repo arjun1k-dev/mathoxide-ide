@@ -1356,6 +1356,7 @@ dependencies = [
  "image",
  "mo-core",
  "mo-dsl",
+ "mo-interactive",
  "mo-moab",
  "mo-render",
 ]
@@ -1391,8 +1392,11 @@ name = "mo-interactive"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "glam",
  "mo-core",
  "mo-render",
+ "pollster",
+ "wgpu",
  "winit",
 ]
 

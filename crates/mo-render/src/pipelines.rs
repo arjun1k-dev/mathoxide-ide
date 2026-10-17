@@ -306,9 +306,33 @@ impl Renderer {
 
     /// Render a HashMap state to the offscreen target, return RGBA pixels.
     pub fn render(&self, state: &std::collections::HashMap<String, VGroup>) -> image::RgbaImage {
+        let cam = self.default_camera();
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.draw_scene_pass(state, &cam, &mut encoder);
+        self.queue.submit(Some(encoder.finish()));
+        let bytes = self.read_target();
+        image::RgbaImage::from_raw(self.width, self.height, bytes).expect("size mismatch")
+    }
+
+    /// Recreate the present pipeline for a surface's color format.
+    pub fn set_present_format(&mut self, format: wgpu::TextureFormat) {
+        self.present_pipeline = Self::present_pipeline(&self.device, format);
+    }
+
+    pub fn default_camera(&self) -> mo_core::camera::Camera {
         let mut cam = mo_core::camera::Camera::default();
         cam.width = self.width as f32;
         cam.height = self.height as f32;
+        cam
+    }
+
+    /// Record the scene into an encoder (caller submits, can add present pass).
+    pub fn draw_scene_pass(
+        &self,
+        state: &std::collections::HashMap<String, VGroup>,
+        cam: &mo_core::camera::Camera,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         let frame: FrameUniforms = cam.uniforms();
         self.queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
         let frame_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -336,7 +360,6 @@ impl Renderer {
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -367,10 +390,6 @@ impl Renderer {
                 self.draw_stroke(&mut pass, group, &frame_bg_s);
             }
         }
-        self.queue.submit(Some(encoder.finish()));
-
-        let bytes = self.read_target();
-        image::RgbaImage::from_raw(self.width, self.height, bytes).expect("size mismatch")
     }
 
     fn draw_fill<'a>(

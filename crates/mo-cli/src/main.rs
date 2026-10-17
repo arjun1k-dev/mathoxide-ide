@@ -31,6 +31,9 @@ enum Cmd {
         #[arg(long, default_value = "60")]
         fps: u32,
     },
+    /// Open an interactive preview window (space = play/pause, arrows = scrub,
+    /// drag = pan, wheel = zoom, drag object = move it).
+    Preview { file: String },
     /// Compile .moa into a .moab bundle.
     Compile {
         file: String,
@@ -71,6 +74,11 @@ fn main() -> Result<()> {
                 }
                 None => render_video(&renderer, &tl, &out, fps)?,
             }
+        }
+        Cmd::Preview { file } => {
+            let src = std::fs::read_to_string(&file).context("read file")?;
+            let tl = mo_dsl::parse(&src).map_err(|d| anyhow::anyhow!("{d:?}"))?;
+            mo_interactive::preview(tl)?;
         }
         Cmd::Compile { file, out } => {
             let src = std::fs::read_to_string(&file).context("read file")?;
