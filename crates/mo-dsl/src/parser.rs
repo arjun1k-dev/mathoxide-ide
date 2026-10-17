@@ -670,7 +670,7 @@ fn build_object(
             let to_x = get_f(params, "to").unwrap_or(axes.x_range.1);
             let samples = get_f(params, "samples").unwrap_or(120.0) as usize;
             let plot_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#58C4DD"));
-            let plot_sw = get_f(params, "sw").unwrap_or(4.0);
+            let plot_sw = get_f(params, "sw").unwrap_or(2.0);
 
             axes.plot_expr(&expr, from_x, to_x, samples, plot_stroke, plot_sw)
         }
@@ -810,11 +810,22 @@ fn build_object(
     Ok(obj)
 }
 
-fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
+/// Where a flattened `Stmt::Play` came from. `file == None` means the play was
+/// written in the master source itself; `Some(path, j)` means it is the j-th
+/// play (flat order) of the imported asset at `path`. Order matches the flat
+/// play sequence in the lowered timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayOrigin {
+    pub file: Option<std::path::PathBuf>,
+    pub local_play_idx: usize,
+}
+
+fn lower(raws: Vec<RawStmt>) -> Result<(Timeline, Vec<PlayOrigin>), String> {
     // transform(c, c2) resolves against objects declared so far.
     let mut declared: std::collections::HashMap<String, VGroup> = Default::default();
     let mut axes_map: std::collections::HashMap<String, mo_core::Axes> = Default::default();
     let mut tl = Timeline { stmts: Vec::new() };
+    let mut origins: Vec<PlayOrigin> = Vec::new();
     for raw in raws {
         match raw {
             RawStmt::Decl { kind, name, params } => {
@@ -869,6 +880,7 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                     (other, _) => return Err(format!("unknown animation `{other}`")),
                 };
                 tl.stmts.push(Stmt::Play(TimedAnim::new(anim, run_time, &rate_name)));
+                origins.push(PlayOrigin { file: None, local_play_idx: 0 });
             }
             RawStmt::CameraPlay { kind, params, run_time, rate } => {
                 let run_time = run_time.unwrap_or(1.0);
@@ -901,6 +913,7 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                     _ => return Err(format!("unknown camera animation `{kind}`")),
                 };
                 tl.stmts.push(Stmt::Play(TimedAnim::new(anim, run_time, &rate_name)));
+                origins.push(PlayOrigin { file: None, local_play_idx: 0 });
             }
             RawStmt::Wait(d) => tl.stmts.push(Stmt::Wait(d)),
             RawStmt::Import { path, alias, at } => {
@@ -934,6 +947,7 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                 })?;
 
                 let shift_vec = at.unwrap_or(Vec3::ZERO);
+                let mut local_play_idx: usize = 0;
                 for stmt in imported_tl.stmts {
                     match stmt {
                         Stmt::Decl { id, mut obj } => {
@@ -975,6 +989,11 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                                 };
                             }
                             tl.stmts.push(Stmt::Play(anim));
+                            origins.push(PlayOrigin {
+                                file: Some(resolved.clone()),
+                                local_play_idx,
+                            });
+                            local_play_idx += 1;
                         }
                         Stmt::Wait(d) => {
                             tl.stmts.push(Stmt::Wait(d));
@@ -984,11 +1003,16 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
             }
         }
     }
-    Ok(tl)
+    Ok((tl, origins))
 }
 
-/// Parse a whole .moa file into a Timeline, with line/col diagnostics.
+/// Parse a whole .moa file into a Timeline (with play origins discarded),
+/// with line/col diagnostics.
 pub fn parse(src: &str) -> Result<Timeline, Vec<Diag>> {
+    parse_inner(src).map(|(tl, _)| tl)
+}
+
+fn parse_inner(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
     let mut lexer = Lexer::new(src);
     let mut toks = Vec::new();
     loop {
@@ -1023,9 +1047,15 @@ pub fn parse(src: &str) -> Result<Timeline, Vec<Diag>> {
         return Err(diags);
     }
     match lower(raws) {
-        Ok(tl) => Ok(tl),
+        Ok((tl, origins)) => Ok((tl, origins)),
         Err(m) => Err(vec![Diag { line: 1, col: 1, message: m }]),
     }
+}
+
+/// Like `parse`, but also returns per-play provenance (which source file each
+/// flattened play came from). Origins align with the flat play sequence.
+pub fn parse_with_origins(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
+    parse_inner(src)
 }
 
 /// Skip to just past the next `;` so parsing can continue after an error.
@@ -1150,6 +1180,34 @@ mod tests {
         let c = obj.center();
         assert!((c.x - 2.0).abs() < 1e-3);
         assert!((c.y - 3.0).abs() < 1e-3);
+
+        let _ = std::fs::remove_file(asset_file);
+    }
+
+    #[test]
+    fn import_origins_align_with_flat_play_order() {
+        let temp_dir = std::env::temp_dir();
+        let asset_file = temp_dir.join("test_origin_asset.moa");
+        std::fs::write(
+            &asset_file,
+            "circle sub_c at (0,0) r=1.5;\nplay showCreation(sub_c) 1s;\nplay fadeIn(sub_c) 0.5s;",
+        )
+        .expect("write temp asset");
+
+        let src = format!(
+            "import \"{}\" as a1;\ncircle m r=1;\nplay showCreation(m) 2s;\nplay showCreation(a1_sub_c) 1s;",
+            asset_file.to_str().unwrap()
+        );
+        let (tl, origins) = parse_with_origins(&src).expect("parses");
+        assert_eq!(tl.duration(), 4.5);
+
+        // flat play order: imported showCreation, imported fadeIn, master showCreation(m), master showCreation(a1_sub_c)
+        assert_eq!(origins.len(), 4);
+        assert_eq!(origins[0].file.as_deref(), Some(asset_file.as_path()));
+        assert_eq!(origins[0].local_play_idx, 0);
+        assert_eq!(origins[1].local_play_idx, 1);
+        assert_eq!(origins[2].file, None);
+        assert_eq!(origins[3].file, None);
 
         let _ = std::fs::remove_file(asset_file);
     }
