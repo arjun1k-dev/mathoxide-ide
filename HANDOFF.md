@@ -186,30 +186,27 @@ MathOxide is evolving into an autonomous mathematical creative suite. A develope
 
 If you are the incoming agent picking up the codebase, here is your concrete, prioritized roadmap:
 
-#### Task 1: Interactive Timeline Track Drag & Trim (`crates/mo-ide/src/timeline.rs`)
-* **Current State**: The timeline scrubber displays animation blocks on sequencer tracks as read-only colored rounded rectangles.
-* **Next Step**: Make animation blocks interactive:
-  - Left-click + horizontal drag on an animation block shifts its start time in the sequence.
-  - Dragging the left or right edge trims its `run_time`.
-  - Add an "Apply Timeline Timings to Code" action (similar to the inspector's "Apply Shift to Code") that updates `1.5s` values in the `.moa` code.
+#### ~~Task 1: Interactive Timeline Track Drag & Trim~~ — DONE (commit a32ca49)
+Animation blocks are draggable (trades time with a preceding/inserted Wait) and right-edge trimmable; `💾 Apply Timings to Code` rewrites `Ns` durations in the source (skipped for scenes with `import` — durations there live in the asset files).
 
-#### Task 2: Camera Animation Keyframing in DSL (`crates/mo-dsl`, `crates/mo-core`)
-* **Current State**: Camera 3D orbit can be manipulated via interactive mouse drag or CLI flags (`--phi`, `--theta`).
-* **Next Step**: Add dynamic camera movements into the animation timeline in DSL:
-  ```moa
-  play camera.orbit(phi=60, theta=45) 2.0s smooth;
-  play camera.zoom(1.5) 1.0s smooth;
-  play camera.move_to((2, 0)) 1.5s smooth;
-  ```
-  Add `TimedAnim::CameraOrbit`, `TimedAnim::CameraZoom`, and update `Player::state_at` or camera state interpolation at time $t$.
+#### ~~Task 2: Camera Animation Keyframing in DSL~~ — DONE (commit 2b16592)
+```moa
+play camera.orbit(phi=60, theta=45) 2.0s smooth;
+play camera.zoom(factor=1.5) 1.0s smooth;
+play camera.move_to(x=2, y=-1) 1.5s smooth;
+```
+`Player::camera_at(tl, t, base)` interpolates camera state; wired into CLI render (frame + video) and the IDE viewport (animated camera overrides the interactive base). Demo: `assets/camera_motion.moa`.
 
-#### Task 3: 3D Surface Shading & Lighting Depth
-* **Current State**: 3D surfaces (`surface3d`) render as wireframe contour curves.
-* **Next Step**: Add filled triangle mesh tessellation with directional lighting or height-based color ramps (e.g. Viridis / Plasma gradients based on $z$ height), utilizing the WGPU shaders in `shaders/fill.wgsl`.
+#### ~~Task 3: 3D Surface Shading & Lighting Depth~~ — DONE (commit cfd7bec)
+`surface3d ... fill=true` renders flat-shaded cell quads colored by a Viridis height ramp (`color::viridis`) with a darkened height-tinted wireframe on top. Demo: `assets/shaded_surface.moa`. Possible follow-up: true directional lighting in the shader.
 
-#### Task 4: Packaging the MCP Server into Antigravity / Claude Agent Config
-* **Current State**: `crates/mo-mcp` is a fully functional JSON-RPC server with 6 core tools compiled at `target/debug/mathoxide-mcp`.
-* **Next Step**: Create a configuration entry or MCP JSON manifest so that any agent running on the user's machine can immediately call MathOxide tools directly from chat.
+#### ~~Task 4: Packaging the MCP Server~~ — DONE (commit e8f6eac)
+Project-level `.mcp.json` registers `mathoxide-mcp` (release binary, stdio JSON-RPC). Claude Code prompts for approval on first use in this directory.
+
+#### Next up (suggested)
+1. Timeline drag/trim for imported-asset timings (currently Apply-Timings skips files with `import`).
+2. Directional lighting / normal-based shading for `surface3d` fills.
+3. Playback of camera anims inside `mo preview` (winit window) — currently only CLI render + IDE viewport use `camera_at`.
 
 ---
 
