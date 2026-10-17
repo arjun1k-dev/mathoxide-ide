@@ -4,18 +4,20 @@
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM).
-* **Build & Test Health**: **51 workspace unit tests pass with zero errors and zero compiler warnings.**
+* **Build & Test Health**: **57 workspace unit tests pass with zero errors and zero compiler warnings.**
   ```
-  mo-core:        34 passed
-  mo-dsl:         10 passed
-  mo-ide:          3 passed
+  mo-core:        36 passed  (incl. viridis ramp, camera_at interpolation)
+  mo-dsl:         13 passed  (incl. camera anim parsing, error positions)
+  mo-ide:          6 passed  (incl. apply-timings-to-code round-trips)
   mo-moab:         2 passed
   mo-render:       2 passed
   ```
-* **Git Checkpoint State**: Clean working tree. Latest commits on `main`:
-  - `9c61767`: `feat: modular asset architecture, 16:9 letterbox viewport, 3D orbit and native file dialogs`
-  - `7e46e17`: `feat: complete Model Context Protocol (MCP) server for MathOxide agent integration`
-  - `005ea61`: `docs: finalize comprehensive HANDOFF.md for future sessions`
+* **Git Checkpoint State**: Clean working tree. Latest commits on `main` (2026-10-17 priority-queue session):
+  - `3495f81`: `docs: mark priority queue tasks 1-4 done, add next-up suggestions`
+  - `e8f6eac`: `feat: project .mcp.json — MathOxide MCP server auto-configured for agents`
+  - `cfd7bec`: `feat: filled 3D surface shading with Viridis height ramp (surface3d fill=true)`
+  - `2b16592`: `feat: camera keyframe animations — camera.orbit/zoom/move_to in DSL`
+  - `a32ca49`: `feat: interactive timeline blocks — drag to shift start, right-edge trim, apply timings to code`
 
 ---
 
@@ -32,7 +34,10 @@ This section outlines every user request, architectural decision, and code trans
 | **Font Boldness Bug** | Text and formulas spawned as heavy, bold vector shapes and snapped to slim weights when animations completed. | *"When text or math appears, it initially starts as very bold font, and once fully into scene it turns to normal. Look what's causing this and fix it!"* | **Zero Synthetic Stroke**: Identified that `ShowCreation` applied an artificial stroke ($sw = 2.0$) on font curves during transitions. TrueType outlines are designed for fill only. Replaced with sequential subpath reveal (`extract_subpaths()`) with $sw = 0$. Fonts are razor-sharp from frame 0. |
 | **File System Interaction** | IDE only edited a hardcoded buffer; couldn't open or save files on the laptop. | *"Currently, the IDE can't interact with files on my laptop. So add that feature or fix it if already exists."* | **Native OS File Dialogs (`rfd`)**: Added cross-platform system file dialogs for Open File (`Ctrl+O`), Open Project Folder, Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), and Export MP4 / MOAB. Added dedicated `📁 Assets` browser tab in IDE left panel. |
 | **3D Rendering** | Purely 2D top-down camera with no elevation tilt, azimuth, or 3D primitives. | *"We also need to add 3D, just tell me if current resources are enough or you need more."* | **Full 3D Orbit & Primitives**: Existing WGPU shaders and `glam` were 100% sufficient without adding heavy game engines. Added polar tilt ($\phi$), azimuth ($\theta$), and roll ($\gamma$) to `Camera`. Added `axes3d`, `cube`, `sphere`, `surface3d` ($z = f(x, y)$), and right-click viewport 3D orbit controls. |
-| **Agent / MCP Tooling** | `crates/mo-mcp` was an empty stub with `main()` printing "coming in Phase 5". | *"This will allow our later MCP integration plan to be successful, as it won't be scanning entire codebase..."* | **Full Model Context Protocol Server**: Implemented standard JSON-RPC 2.0 stdio server in `crates/mo-mcp` with tools for listing assets, reading source, writing assets, syntax validation, and headless frame rendering. |
+| **Agent / MCP Tooling** | `crates/mo-mcp` was an empty stub with `main()` printing "coming in Phase 5". | *"This will allow our later MCP integration plan to be successful, as it won't be scanning entire codebase..."* | **Full Model Context Protocol Server**: Implemented standard JSON-RPC 2.0 stdio server in `crates/mo-mcp` with tools for listing assets, reading source, writing assets, syntax validation, and headless frame rendering. Now registered via project-level `.mcp.json` (commit e8f6eac) — Claude Code prompts for approval on first use in this directory. |
+| **Timeline Editing** | Timeline scrubber showed animation blocks as read-only colored rectangles; timings only editable by hand in code. | Priority-queue Task 1 (handoff roadmap). | **Interactive Sequencer**: Blocks drag horizontally to shift start (trades time with a preceding auto-inserted `Wait`); right edge drags to trim `run_time` (min 0.1s); resize/grab cursor feedback; `💾 Apply Timings to Code` rewrites `Ns` durations in the source (refuses scenes with `import` — positional rewrite would be ambiguous). Commit a32ca49. |
+| **Camera Keyframing** | Camera only movable interactively (mouse orbit/pan/zoom) or via static CLI flags (`--phi/--theta/--gamma`); DSL had no camera motion. | Priority-queue Task 2 (handoff roadmap). | **Camera Animations in DSL**: `play camera.orbit(phi=60, theta=-45) 2s smooth;`, `camera.zoom(factor=1.5)`, `camera.move_to(x=2, y=-1)`. Lexer gained a `Dot` token; parser parses `play camera.<kind>(key=value, ...)` with line/col diagnostics. `Player::camera_at(tl, t, base)` statelessly interpolates (rate-eased); wired into CLI frame+video render and IDE viewport (animated values override the interactive base camera). Demo: `assets/camera_motion.moa`. Commit 2b16592. |
+| **3D Surface Shading** | `surface3d` rendered as white wireframe contour lines only — no depth reading. | Priority-queue Task 3 (handoff roadmap). | **Height-Ramped Filled Surfaces**: `surface3d ... fill=true` builds flat-shaded per-cell quads (92% alpha) colored by `color::viridis` (5-stop perceptual ramp on normalized z), with the wireframe darkened (×0.45) and tinted by segment height on top. Fully procedural, lean buffers (iGPU-safe). Demo: `assets/shaded_surface.moa`. Commit cfd7bec. |
 
 ---
 
@@ -44,12 +49,15 @@ mathoxide/
 │   ├── euler_formula.moa       # Euler's identity & complex exponential morphing
 │   ├── sine_wave.moa           # Harmonic wave plotted over Cartesian axes
 │   ├── gaussian_curve.moa      # Normal distribution curve & integral formula
-│   └── cube_3d.moa             # 3D wireframe cube with coordinate axes
+│   ├── cube_3d.moa             # 3D wireframe cube with coordinate axes
+│   ├── camera_motion.moa       # camera.orbit/zoom/move_to keyframe showcase
+│   └── shaded_surface.moa      # Viridis height-ramped surface3d + camera orbit
 ├── examples/                   # Master scenes & compositions
 │   ├── master_video.moa        # Video-editor style sequence importing modular assets
 │   ├── demo_3d.moa             # Full 3D showcase (axes3d, cube, sphere, surface3d)
 │   ├── latex_showcase.moa      # LaTeX equations compiled into quadratic Bézier curves
 │   └── demo.moa                # Basic shapes and morph transforms
+├── .mcp.json                   # Registers mathoxide-mcp for agent sessions in this dir
 ├── shaders/                    # Vendored ManimGL WGSL shaders
 │   ├── fill.wgsl               # 3-pass winding number stencil fill & anti-aliasing
 │   ├── stroke.wgsl             # Procedural GPU ribbon expansion with analytic AA
@@ -119,6 +127,27 @@ mathoxide/
   - `validate_code`: Headless DSL parser & lowerer returning structured diagnostics.
   - `render_frame`: Headless offscreen GPU render of any scene at timestamp $t$ to PNG.
   - `assemble_scene`: Automatically sequences multiple assets into a master `.moa` file.
+* **Auto-registration**: project-level `.mcp.json` points at `target/release/mathoxide-mcp` (rebuild with `cargo build --release -p mo-mcp` if missing). Agents approve it on first session in this directory.
+
+### F. Interactive Timeline Sequencer (`crates/mo-ide/src/timeline.rs`)
+* Animation blocks are drag targets: **body drag** shifts start time by trading seconds with a preceding `Wait` (auto-inserted at 0.0s when absent); **right-edge drag** trims `run_time` (min 0.1s, resize cursor + grip drawn). Play statements in imported assets participate in the same flat timeline.
+* `💾 Apply Timings to Code` rewrites the first `Ns` literal of each `play` line, in document order. It **refuses scenes containing `import` statements** — imported assets contribute plays to the same timeline, so positional rewriting would corrupt the wrong files (edit durations inside the asset files instead).
+* Panel returns a `TimelineAction` (`Edited` → mark dirty; `ApplyTimings` → rewrite + recompile); drags mutate `Timeline` directly and are lost if code is recompiled without applying.
+
+### G. Camera Keyframe Animations (`mo-core`, `mo-dsl`)
+* DSL syntax (degrees for orbit, multiplicative zoom, scene units for move_to):
+  ```moa
+  play camera.orbit(phi=65, theta=-45) 2.0s smooth;
+  play camera.zoom(factor=1.6) 1.2s smooth;
+  play camera.move_to(x=1.5, y=1.0) 1.5s smooth;
+  ```
+* `Player::camera_at(tl, t, base)` — stateless like `state_at`: walks the timeline, interpolating each camera anim with its rate function; completed anims apply their absolute targets. `base` carries the interactive/user camera.
+* Wired into: CLI single-frame + video render, IDE viewport (`has_camera_anims` gate → animated camera overrides base for draw + hit-testing; orbit/pan/zoom still edit the base between keyframes).
+* **Known limitation**: `mo preview` (winit window) does not yet apply `camera_at`; after the last camera anim, interactive orbit on the animated axes is overridden until `R` reset.
+
+### H. Filled 3D Surfaces (`mo-core::geom`, `mo-dsl`)
+* `surface3d ... fill=true` → `geom::surface_3d_filled`: per-cell closed quadratic quads (straight edges via midpoint handles), flat-shaded with `color::viridis((z - z_min)/span)` at 0.92 alpha, drawn beneath a wireframe darkened ×0.45 and height-tinted per segment.
+* `color::viridis(t)` is a 5-stop lerp (purple → blue → teal → green → yellow); unit-tested for endpoints and near-monotonic green channel.
 
 ---
 
@@ -147,6 +176,10 @@ cargo run -p mo-cli -- render examples/demo_3d.moa -o demo_3d.mp4 --phi 65 --the
 
 # Render a single still frame as PNG:
 cargo run -p mo-cli -- render examples/master_video.moa -o frame.png --frame 4.5
+
+# Camera keyframes + shaded surface demos (camera anims work without --phi/--theta):
+cargo run -p mo-cli -- render assets/camera_motion.moa -o camera_motion.mp4
+cargo run -p mo-cli -- render assets/shaded_surface.moa -o shaded_surface.mp4
 ```
 
 ### Test the MCP Server via stdio:
@@ -170,6 +203,12 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
    - Keep window size within `1280x760` or `1366x768` by default to ensure comfort on 14-inch laptop screens without panel clipping.
 5. **No Artificial Stroke on Fonts**:
    - TrueType font glyphs extracted via `ttf-parser` are designed solely for vector fill. Never set `stroke_width > 0` on font outlines unless explicitly requested for an outline-only aesthetic.
+6. **Timeline Drag Borrows & Wait Insertion**:
+   - The sequencer mutates `Timeline` in place, so `app.rs` must split borrows with `mem::take(&mut self.timeline_panel)`. Body-drag guarantees a preceding `Stmt::Wait` exists (inserting one shifts the Play's statement index — increment `play_idx` after insert). Positional freedom of a block is exactly its preceding Wait: `new_wait = pointer_time - prefix_before_wait`.
+7. **Apply-Timings Ambiguity with Imports**:
+   - Imported assets append plays to the same flat timeline, so rewriting `Ns` by position in the master file would corrupt asset durations. `apply_timings_to_dsl` bails (returns `None`) whenever the code contains an `import` line — surface a clear status message instead.
+8. **Animated Camera vs Interactive Camera**:
+   - The IDE viewport keeps the user's orbit/pan/zoom in a base `Camera` and computes an owned `cam_owned` (clone or `Player::camera_at`) each frame — never hold a borrow of `camera` across the input-handling code (borrow-checker: zoom/pan/orbit mutate it). Interactive edits between keyframes are respected; during/after a camera anim the keyframed values win.
 
 ---
 
