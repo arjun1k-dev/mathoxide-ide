@@ -65,7 +65,8 @@ impl MathOxideApp {
 
         let mut camera = Camera::default();
         camera.width = initial_w as f32;
-        camera.height = 8.0;
+        camera.height = initial_h as f32;
+        camera.frame_height = 8.0;
 
         let path = initial_file.unwrap_or_else(|| PathBuf::from("examples/demo.moa"));
         let (code, watcher) = if path.exists() {
@@ -248,7 +249,7 @@ impl eframe::App for MathOxideApp {
                     ui.separator();
                     if ui.button("Reset Camera (R)").clicked() {
                         self.camera.center = glam::Vec3::ZERO;
-                        self.camera.height = 8.0;
+                        self.camera.frame_height = 8.0;
                         ui.close_menu();
                     }
                 });
@@ -307,8 +308,8 @@ impl eframe::App for MathOxideApp {
         if self.show_timeline {
             egui::TopBottomPanel::bottom("bottom_timeline_panel")
                 .resizable(true)
-                .default_height(140.0)
-                .min_height(90.0)
+                .default_height(110.0)
+                .min_height(75.0)
                 .show(ctx, |ui| {
                     self.timeline_panel.show(
                         ui,
@@ -322,8 +323,8 @@ impl eframe::App for MathOxideApp {
         if self.show_editor || self.show_scene_tree {
             egui::SidePanel::left("left_side_panel")
                 .resizable(true)
-                .default_width(380.0)
-                .min_width(260.0)
+                .default_width(300.0)
+                .min_width(200.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         if self.show_editor && ui.selectable_label(self.left_tab == 0, "📝 Editor").clicked() {
@@ -367,8 +368,8 @@ impl eframe::App for MathOxideApp {
         if self.show_inspector {
             egui::SidePanel::right("right_inspector_panel")
                 .resizable(true)
-                .default_width(300.0)
-                .min_width(220.0)
+                .default_width(240.0)
+                .min_width(170.0)
                 .show(ctx, |ui| {
                     let current_state = if let Some(tl) = &self.timeline {
                         Player::state_at(tl, self.current_time)

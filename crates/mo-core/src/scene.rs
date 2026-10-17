@@ -183,13 +183,13 @@ impl Player {
                                 break;
                             }
                         }
-                        Animation::FadeOut { .. } => {
+                        Animation::FadeOut { .. } | Animation::ShrinkToCenter { .. } => {
                             if t >= end {
                                 state.remove(&id);
                             } else {
                                 let target = state.get(&id).cloned().unwrap_or_default();
                                 let mut scratch = target.clone();
-                                if let Some(out) = anim::sample(ta, &VGroup::new(), &target, t - start) {
+                                if let Some(out) = anim::sample(ta, &target, &target, t - start) {
                                     scratch = out;
                                 }
                                 state.insert(id, scratch);
@@ -199,7 +199,12 @@ impl Player {
                                 break;
                             }
                         }
-                        Animation::ShowCreation { .. } | Animation::Grow { .. } | Animation::Rotate { .. } => {
+                        Animation::ShowCreation { .. }
+                        | Animation::Grow { .. }
+                        | Animation::Rotate { .. }
+                        | Animation::SpinInFromNothing { .. }
+                        | Animation::Indicate { .. }
+                        | Animation::Wiggle { .. } => {
                             let target = state.get(&id).cloned().unwrap_or_default();
                             if t >= end {
                                 if matches!(ta.anim, Animation::Rotate { .. }) {

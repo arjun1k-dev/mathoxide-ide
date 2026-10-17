@@ -186,6 +186,10 @@ impl TimelinePanel {
                 mo_core::anim::Animation::FadeIn { id, .. } => format!("FadeIn({})", id),
                 mo_core::anim::Animation::FadeOut { id, .. } => format!("FadeOut({})", id),
                 mo_core::anim::Animation::Grow { id, .. } => format!("Grow({})", id),
+                mo_core::anim::Animation::SpinInFromNothing { id } => format!("SpinIn({})", id),
+                mo_core::anim::Animation::ShrinkToCenter { id } => format!("Shrink({})", id),
+                mo_core::anim::Animation::Indicate { id, .. } => format!("Indicate({})", id),
+                mo_core::anim::Animation::Wiggle { id, .. } => format!("Wiggle({})", id),
             };
 
             if block_rect.width() > 30.0 {

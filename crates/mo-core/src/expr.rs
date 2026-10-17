@@ -1,9 +1,12 @@
 //! Mathematical expression parser and evaluator for parametric and function graphing.
 
-#[derive(Clone, Debug)]
+use ndarray::Array1;
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Num(f32),
-    Var, // variable 'x' or 't'
+    Var,  // variable 'x' or 't'
+    VarY, // variable 'y'
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
@@ -17,33 +20,90 @@ pub enum Expr {
     Abs(Box<Expr>),
     Exp(Box<Expr>),
     Ln(Box<Expr>),
+    Erf(Box<Expr>),
+    Gamma(Box<Expr>),
+    Sinc(Box<Expr>),
 }
 
 impl Expr {
-    pub fn eval(&self, x: f32) -> f32 {
+    pub fn eval_2d(&self, x: f32, y: f32) -> f32 {
         match self {
             Expr::Num(n) => *n,
             Expr::Var => x,
-            Expr::Add(a, b) => a.eval(x) + b.eval(x),
-            Expr::Sub(a, b) => a.eval(x) - b.eval(x),
-            Expr::Mul(a, b) => a.eval(x) * b.eval(x),
+            Expr::VarY => y,
+            Expr::Add(a, b) => a.eval_2d(x, y) + b.eval_2d(x, y),
+            Expr::Sub(a, b) => a.eval_2d(x, y) - b.eval_2d(x, y),
+            Expr::Mul(a, b) => a.eval_2d(x, y) * b.eval_2d(x, y),
             Expr::Div(a, b) => {
-                let denom = b.eval(x);
+                let denom = b.eval_2d(x, y);
                 if denom.abs() < 1e-9 {
                     0.0
                 } else {
-                    a.eval(x) / denom
+                    a.eval_2d(x, y) / denom
                 }
             }
-            Expr::Pow(a, b) => a.eval(x).powf(b.eval(x)),
-            Expr::Neg(a) => -a.eval(x),
-            Expr::Sin(a) => a.eval(x).sin(),
-            Expr::Cos(a) => a.eval(x).cos(),
-            Expr::Tan(a) => a.eval(x).tan(),
-            Expr::Sqrt(a) => a.eval(x).max(0.0).sqrt(),
-            Expr::Abs(a) => a.eval(x).abs(),
-            Expr::Exp(a) => a.eval(x).exp(),
-            Expr::Ln(a) => a.eval(x).max(1e-9).ln(),
+            Expr::Pow(a, b) => a.eval_2d(x, y).powf(b.eval_2d(x, y)),
+            Expr::Neg(a) => -a.eval_2d(x, y),
+            Expr::Sin(a) => a.eval_2d(x, y).sin(),
+            Expr::Cos(a) => a.eval_2d(x, y).cos(),
+            Expr::Tan(a) => a.eval_2d(x, y).tan(),
+            Expr::Sqrt(a) => a.eval_2d(x, y).max(0.0).sqrt(),
+            Expr::Abs(a) => a.eval_2d(x, y).abs(),
+            Expr::Exp(a) => a.eval_2d(x, y).exp(),
+            Expr::Ln(a) => a.eval_2d(x, y).max(1e-9).ln(),
+            Expr::Erf(a) => statrs::function::erf::erf(a.eval_2d(x, y) as f64) as f32,
+            Expr::Gamma(a) => statrs::function::gamma::gamma(a.eval_2d(x, y) as f64) as f32,
+            Expr::Sinc(a) => {
+                let v = a.eval_2d(x, y);
+                if v.abs() < 1e-9 {
+                    1.0
+                } else {
+                    v.sin() / v
+                }
+            }
+        }
+    }
+
+    pub fn eval(&self, x: f32) -> f32 {
+        self.eval_2d(x, 0.0)
+    }
+
+    /// Evaluates the expression across an ndarray 1D buffer in a vectorized fashion.
+    pub fn eval_array(&self, x: &Array1<f32>) -> Array1<f32> {
+        match self {
+            Expr::Num(n) => Array1::from_elem(x.len(), *n),
+            Expr::Var => x.clone(),
+            Expr::VarY => Array1::zeros(x.len()),
+            Expr::Add(a, b) => a.eval_array(x) + b.eval_array(x),
+            Expr::Sub(a, b) => a.eval_array(x) - b.eval_array(x),
+            Expr::Mul(a, b) => a.eval_array(x) * b.eval_array(x),
+            Expr::Div(a, b) => {
+                let numer = a.eval_array(x);
+                let denom = b.eval_array(x);
+                ndarray::Zip::from(&numer).and(&denom).map_collect(|&num, &den| {
+                    if den.abs() < 1e-9 {
+                        0.0
+                    } else {
+                        num / den
+                    }
+                })
+            }
+            Expr::Pow(a, b) => {
+                let base = a.eval_array(x);
+                let exp = b.eval_array(x);
+                ndarray::Zip::from(&base).and(&exp).map_collect(|&bs, &ex| bs.powf(ex))
+            }
+            Expr::Neg(a) => -a.eval_array(x),
+            Expr::Sin(a) => a.eval_array(x).mapv(f32::sin),
+            Expr::Cos(a) => a.eval_array(x).mapv(f32::cos),
+            Expr::Tan(a) => a.eval_array(x).mapv(f32::tan),
+            Expr::Sqrt(a) => a.eval_array(x).mapv(|v| v.max(0.0).sqrt()),
+            Expr::Abs(a) => a.eval_array(x).mapv(f32::abs),
+            Expr::Exp(a) => a.eval_array(x).mapv(f32::exp),
+            Expr::Ln(a) => a.eval_array(x).mapv(|v| v.max(1e-9).ln()),
+            Expr::Erf(a) => a.eval_array(x).mapv(|v| statrs::function::erf::erf(v as f64) as f32),
+            Expr::Gamma(a) => a.eval_array(x).mapv(|v| statrs::function::gamma::gamma(v as f64) as f32),
+            Expr::Sinc(a) => a.eval_array(x).mapv(|v| if v.abs() < 1e-9 { 1.0 } else { v.sin() / v }),
         }
     }
 
@@ -61,7 +121,8 @@ impl Expr {
 #[derive(Clone, Debug, PartialEq)]
 enum Token {
     Num(f32),
-    Var,
+    VarX,
+    VarY,
     Ident(String),
     Plus,
     Minus,
@@ -109,7 +170,8 @@ fn tokenize(s: &str) -> Result<Vec<Token>, String> {
                 }
                 let name: String = chars[start..i].iter().collect();
                 match name.as_str() {
-                    "x" | "t" | "X" | "T" => tokens.push(Token::Var),
+                    "x" | "t" | "X" | "T" => tokens.push(Token::VarX),
+                    "y" | "Y" => tokens.push(Token::VarY),
                     "pi" | "PI" => tokens.push(Token::Num(std::f32::consts::PI)),
                     "tau" | "TAU" => tokens.push(Token::Num(std::f32::consts::TAU)),
                     "e" | "E" => tokens.push(Token::Num(std::f32::consts::E)),
@@ -198,9 +260,13 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
             *pos += 1;
             Ok(Expr::Num(val))
         }
-        Token::Var => {
+        Token::VarX => {
             *pos += 1;
             Ok(Expr::Var)
+        }
+        Token::VarY => {
+            *pos += 1;
+            Ok(Expr::VarY)
         }
         Token::Ident(fn_name) => {
             let name = fn_name.clone();
@@ -221,7 +287,10 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
                 "sqrt" => Ok(Expr::Sqrt(Box::new(arg))),
                 "abs" => Ok(Expr::Abs(Box::new(arg))),
                 "exp" => Ok(Expr::Exp(Box::new(arg))),
-                "ln" => Ok(Expr::Ln(Box::new(arg))),
+                "ln" | "log" => Ok(Expr::Ln(Box::new(arg))),
+                "erf" => Ok(Expr::Erf(Box::new(arg))),
+                "gamma" => Ok(Expr::Gamma(Box::new(arg))),
+                "sinc" => Ok(Expr::Sinc(Box::new(arg))),
                 _ => Err(format!("unknown function `{name}`")),
             }
         }
@@ -257,5 +326,27 @@ mod tests {
         // At x = PI: 2 * (-1) + PI^2 = -2 + 9.8696...
         let expected = -2.0 + std::f32::consts::PI * std::f32::consts::PI;
         assert!((e.eval(std::f32::consts::PI) - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_eval_vectorized_ndarray() {
+        let e = Expr::parse("sin(x) + 1").unwrap();
+        let xs = ndarray::Array1::from_vec(vec![0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI]);
+        let ys = e.eval_array(&xs);
+        assert!((ys[0] - 1.0).abs() < 1e-6);
+        assert!((ys[1] - 2.0).abs() < 1e-6);
+        assert!((ys[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_eval_2d_and_special() {
+        let e_2d = Expr::parse("-y + x").unwrap();
+        assert_eq!(e_2d.eval_2d(3.0, 5.0), -2.0);
+
+        let e_sinc = Expr::parse("sinc(x)").unwrap();
+        assert!((e_sinc.eval(0.0) - 1.0).abs() < 1e-6);
+
+        let e_gamma = Expr::parse("gamma(x)").unwrap();
+        assert!((e_gamma.eval(5.0) - 24.0).abs() < 1e-4);
     }
 }

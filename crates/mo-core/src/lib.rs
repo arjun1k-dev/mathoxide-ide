@@ -9,6 +9,8 @@ pub mod text;
 pub mod curve;
 pub mod expr;
 pub mod axes;
+pub mod math;
+pub mod svg;
 
 pub use camera::{Camera, FrameUniforms};
 pub use scene::{Player, Timeline, Stmt};
@@ -17,3 +19,7 @@ pub use rate::RateFn;
 pub use axes::Axes;
 pub use curve::{approx_smooth_quadratic_bezier_handles, smooth_curve_from_points};
 pub use expr::Expr;
+pub use svg::{parse_svg, render_math};
+pub use nalgebra;
+pub use ndarray;
+pub use num_complex;

@@ -48,7 +48,10 @@ impl VGroup {
     }
 
     pub fn curve_count(&self) -> usize {
-        self.subpaths.iter().map(|sp| (sp.end - sp.start - 1) / 2).sum()
+        self.subpaths
+            .iter()
+            .map(|sp| (sp.end.saturating_sub(sp.start).saturating_sub(1)) / 2)
+            .sum()
     }
 
     /// Start a new subpath at `anchor` (pushes one record).
@@ -57,9 +60,21 @@ impl VGroup {
         p.point = anchor.to_array();
         self.points.push(p);
         self.subpaths.push(SubPath {
-            start: self.points.len() - 1,
+            start: self.points.len().saturating_sub(1),
             end: self.points.len(),
         });
+    }
+
+    /// Append another VGroup into self, correctly offsetting subpath indices.
+    pub fn append(&mut self, other: VGroup) {
+        let offset = self.points.len();
+        self.points.extend(other.points);
+        for sp in other.subpaths {
+            self.subpaths.push(SubPath {
+                start: sp.start + offset,
+                end: sp.end + offset,
+            });
+        }
     }
 
     /// Append a quadratic bezier (handle -> anchor) onto the last subpath.
@@ -78,8 +93,12 @@ impl VGroup {
     /// Close the last subpath back to its start anchor (adds a curve if not adjacent).
     pub fn close(&mut self) {
         let Some(sp) = self.subpaths.last().cloned() else { return };
+        if sp.end <= sp.start || self.points.is_empty() {
+            return;
+        }
         let start = self.points[sp.start].point;
-        let last = self.points[sp.end - 1].point;
+        let last_idx = sp.end.saturating_sub(1);
+        let last = self.points[last_idx].point;
         if last != start {
             let mid = [
                 (last[0] + start[0]) / 2.0,
@@ -88,13 +107,18 @@ impl VGroup {
             ];
             self.add_curve(mid.into(), start.into());
         }
-        self.points[sp.end - 1].point = start;
+        if let Some(sp) = self.subpaths.last_mut() {
+            if sp.end > 0 {
+                self.points[sp.end - 1].point = start;
+            }
+        }
     }
 
     /// Records of curve i, in flat order across subpaths.
     pub fn curves(&self) -> impl Iterator<Item = [Vec3; 3]> + '_ {
         self.subpaths.iter().flat_map(move |sp| {
-            (sp.start..sp.end - 2).step_by(2).map(|r| {
+            let limit = sp.end.saturating_sub(2);
+            (sp.start..limit).step_by(2).map(|r| {
                 [
                     Vec3::from(self.points[r].point),
                     Vec3::from(self.points[r + 1].point),
@@ -224,31 +248,142 @@ impl VGroup {
         self.subpaths = start.subpaths.clone();
     }
 
-    /// Port of manim's align: restructure `self` to have the same subpath/curve
-    /// structure as `target` (adds degenerate curves). Needed before interpolate.
-    pub fn align_to(&mut self, target: &VGroup) {
-        // Simple strategy: pad every subpath's curve count to match, adding
-        // degenerate curves at the last anchor.
-        for i in 0..self.subpaths.len().max(target.subpaths.len()) {
-            let mine = self.subpaths.get(i);
-            let theirs = target.subpaths.get(i);
-            let my_curves = mine.map(|sp| (sp.end - sp.start) / 2).unwrap_or(0);
-            let their_curves = theirs.map(|sp| (sp.end - sp.start) / 2).unwrap_or(0);
-            if my_curves < their_curves {
-                if mine.is_none() {
-                    let at = self.points.last().map(|p| p.point).unwrap_or([0.0; 3]);
-                    self.start_subpath(at.into());
+    /// Extract each subpath as an independent VGroup.
+    pub fn extract_subpaths(&self) -> Vec<VGroup> {
+        let sps = if self.subpaths.is_empty() {
+            if self.points.is_empty() {
+                vec![]
+            } else {
+                vec![SubPath {
+                    start: 0,
+                    end: self.points.len(),
+                }]
+            }
+        } else {
+            self.subpaths.clone()
+        };
+
+        sps.into_iter()
+            .filter_map(|sp| {
+                if sp.end > sp.start && sp.end <= self.points.len() {
+                    let pts = self.points[sp.start..sp.end].to_vec();
+                    let mut g = VGroup::new();
+                    let p_len = pts.len();
+                    g.points = pts;
+                    g.subpaths = vec![SubPath { start: 0, end: p_len }];
+                    Some(g)
+                } else {
+                    None
                 }
-                let anchor = self.points.last().unwrap().clone();
-                for _ in my_curves..their_curves {
-                    self.add_curve(anchor.point.into(), anchor.point.into());
-                }
-            } else if their_curves == 0 && mine.is_none() && self.subpaths.len() > i {
-                // nothing
+            })
+            .collect()
+    }
+
+    /// Resamples or pads points within a single contour to reach `target_len`.
+    pub fn pad_to_length(&mut self, target_len: usize) {
+        if self.points.len() >= target_len || self.points.is_empty() {
+            return;
+        }
+
+        let needed = target_len - self.points.len();
+        let old_len = self.points.len();
+        let mut new_points = Vec::with_capacity(target_len);
+
+        for (i, p) in self.points.iter().enumerate() {
+            new_points.push(*p);
+            let dup_count = (needed * (i + 1)) / old_len - (needed * i) / old_len;
+            for _ in 0..dup_count {
+                new_points.push(*p);
             }
         }
-        // Extra curves on my side get collapsed to degenerate? For v0.1 leave them;
-        // interpolate only touches shared prefix.
+
+        self.points = new_points;
+        self.subpaths = vec![SubPath {
+            start: 0,
+            end: self.points.len(),
+        }];
+    }
+
+    /// Aligns `self` and `target` so that both have an identical number of subpaths
+    /// and points per subpath, enabling smooth Manim-grade interpolation between
+    /// any two shapes, text strings, or LaTeX equations without spurious triangle connections.
+    pub fn align_with(&self, target: &VGroup) -> (VGroup, VGroup) {
+        let mut subs_a = self.extract_subpaths();
+        let mut subs_b = target.extract_subpaths();
+
+        if subs_a.is_empty() && subs_b.is_empty() {
+            return (self.clone(), target.clone());
+        }
+
+        if subs_a.is_empty() {
+            let center = target.center();
+            let mut g = VGroup::new();
+            g.start_subpath(center);
+            subs_a.push(g);
+        }
+
+        if subs_b.is_empty() {
+            let center = self.center();
+            let mut g = VGroup::new();
+            g.start_subpath(center);
+            subs_b.push(g);
+        }
+
+        // Equalize the number of subpaths
+        let max_subs = subs_a.len().max(subs_b.len());
+        fn pad_sub_list(list: &mut Vec<VGroup>, target_count: usize) {
+            if list.len() >= target_count || list.is_empty() {
+                return;
+            }
+            let old_len = list.len();
+            let needed = target_count - old_len;
+            let mut new_list = Vec::with_capacity(target_count);
+            for (i, item) in list.iter().enumerate() {
+                new_list.push(item.clone());
+                let dup_count = (needed * (i + 1)) / old_len - (needed * i) / old_len;
+                for _ in 0..dup_count {
+                    let mut collapsed = item.clone();
+                    let c = item.center();
+                    for pt in &mut collapsed.points {
+                        pt.point = c.to_array();
+                        pt.fill_rgba[3] = 0.0;
+                        pt.stroke_rgba[3] = 0.0;
+                        pt.stroke_width = 0.0;
+                    }
+                    new_list.push(collapsed);
+                }
+            }
+            *list = new_list;
+        }
+
+        pad_sub_list(&mut subs_a, max_subs);
+        pad_sub_list(&mut subs_b, max_subs);
+
+        // Within each subpath pair, pad points to match
+        let mut out_a = VGroup::new();
+        let mut out_b = VGroup::new();
+
+        for (mut sa, mut sb) in subs_a.into_iter().zip(subs_b.into_iter()) {
+            let max_pts = sa.points.len().max(sb.points.len());
+            sa.pad_to_length(max_pts);
+            sb.pad_to_length(max_pts);
+
+            let start_a = out_a.points.len();
+            out_a.points.extend(sa.points);
+            out_a.subpaths.push(SubPath {
+                start: start_a,
+                end: out_a.points.len(),
+            });
+
+            let start_b = out_b.points.len();
+            out_b.points.extend(sb.points);
+            out_b.subpaths.push(SubPath {
+                start: start_b,
+                end: out_b.points.len(),
+            });
+        }
+
+        (out_a, out_b)
     }
 }
 

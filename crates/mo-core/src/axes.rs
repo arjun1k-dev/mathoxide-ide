@@ -1,6 +1,5 @@
 //! Coordinate axes and function graphing, matching ManimGL's CoordinateSystem.
 
-use crate::curve::smooth_curve_from_points;
 use crate::vgroup::VGroup;
 use glam::Vec3;
 
@@ -153,7 +152,7 @@ impl Axes {
         g
     }
 
-    /// Plot a smooth mathematical function y = f(x) over [from_x, to_x].
+    /// Plot a smooth mathematical function y = f(x) over [from_x, to_x] using NumPy-style ndarray sampling.
     pub fn plot(
         &self,
         f: impl Fn(f32) -> f32,
@@ -164,16 +163,44 @@ impl Axes {
         stroke_width: f32,
     ) -> VGroup {
         let n = num_samples.max(4);
-        let mut pts = Vec::with_capacity(n);
-        let dx = (to_x - from_x) / ((n - 1) as f32);
+        let x_arr = crate::math::array::linspace(from_x, to_x, n);
+        let y_arr = crate::math::array::eval_vectorized(&x_arr, f);
+        self.plot_arrays(&x_arr, &y_arr, stroke, stroke_width)
+    }
 
+    /// Plot an analytical Expr using vectorized ndarray evaluation.
+    pub fn plot_expr(
+        &self,
+        expr: &crate::expr::Expr,
+        from_x: f32,
+        to_x: f32,
+        num_samples: usize,
+        stroke: [f32; 4],
+        stroke_width: f32,
+    ) -> VGroup {
+        let n = num_samples.max(4);
+        let x_arr = crate::math::array::linspace(from_x, to_x, n);
+        let y_arr = expr.eval_array(&x_arr);
+        self.plot_arrays(&x_arr, &y_arr, stroke, stroke_width)
+    }
+
+    /// Plot directly from 1D ndarray x and y coordinate arrays.
+    pub fn plot_arrays(
+        &self,
+        x_arr: &ndarray::Array1<f32>,
+        y_arr: &ndarray::Array1<f32>,
+        stroke: [f32; 4],
+        stroke_width: f32,
+    ) -> VGroup {
+        let n = x_arr.len().min(y_arr.len());
+        let mut pts = ndarray::Array2::<f32>::zeros((n, 3));
         for i in 0..n {
-            let x = from_x + dx * (i as f32);
-            let y = f(x);
-            pts.push(self.coords_to_point(x, y));
+            let p = self.coords_to_point(x_arr[i], y_arr[i]);
+            pts[[i, 0]] = p.x;
+            pts[[i, 1]] = p.y;
+            pts[[i, 2]] = p.z;
         }
-
-        smooth_curve_from_points(&pts, stroke, stroke_width)
+        crate::math::bezier::smooth_curve_from_ndarray(&pts, stroke, stroke_width)
     }
 }
 

@@ -176,11 +176,11 @@ impl InspectorPanel {
 
                 ui.collapsing("Camera", |ui| {
                     ui.label(format!("Center: ({:.2}, {:.2})", camera.center.x, camera.center.y));
-                    ui.label(format!("Height: {:.2}", camera.height));
+                    ui.label(format!("Frame Height: {:.2}", camera.frame_height));
                     ui.label(format!("Aspect: {:.2}", camera.aspect_ratio()));
                     if ui.button("Reset Camera (R)").clicked() {
                         camera.center = glam::Vec3::ZERO;
-                        camera.height = 8.0;
+                        camera.frame_height = 8.0;
                     }
                 });
 

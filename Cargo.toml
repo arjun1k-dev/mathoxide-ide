@@ -35,6 +35,15 @@ eframe = { version = "0.31", default-features = false, features = ["default_font
 egui-wgpu = "0.31"
 epaint_default_fonts = "0.31"
 ttf-parser = "0.25"
+ndarray = "0.17"
+num-traits = "0.2"
+num-complex = "0.4"
+approx = "0.5"
+nalgebra = "0.35"
+rustfft = "6.4"
+statrs = "0.19"
+svgtypes = "0.16"
+roxmltree = "0.21"
 
 mo-core = { path = "crates/mo-core" }
 mo-render = { path = "crates/mo-render" }

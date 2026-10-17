@@ -1,0 +1,14 @@
+// MathOxide Numerical Engine Showcase
+// Features: NumPy-equivalent ndarray plotting, nalgebra vector fields, and matrix transformations
+
+axes ax at (0, 0) x=(-5, 5, 1) y=(-3, 3, 1) w=9 h=5.5 stroke=#444455 sw=2;
+func sinc_curve on=ax expr="sinc(x * 2)" from=-5 to=5 stroke=#58C4DD sw=3.5;
+vecfield vf at (0, 0) fx="-y" fy="x" x=(-3, 3, 1.0) y=(-2, 2, 1.0) max_len=0.4 stroke=#FC6255 sw=2;
+square sq at (-3.2, 1.8) side=1.2 mat=(1, 0.5, 0, 1) stroke=#F9C74F sw=2.5;
+text title text="f(x) = sinc(2x) & Rotational Vector Field" at (0, 3.2) size=0.6 stroke=white fill=white;
+
+play showCreation(ax) 1.5s smooth;
+play write(title) 1.0s smooth;
+play showCreation(sinc_curve) 2.0s smooth;
+play fadeIn(vf) 1.5s smooth;
+play showCreation(sq) 1.5s smooth;

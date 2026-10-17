@@ -11,3 +11,12 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 ttf-parser = { workspace = true }
 epaint_default_fonts = { workspace = true }
+ndarray = { workspace = true }
+num-traits = { workspace = true }
+num-complex = { workspace = true }
+approx = { workspace = true }
+nalgebra = { workspace = true }
+rustfft = { workspace = true }
+statrs = { workspace = true }
+svgtypes = { workspace = true }
+roxmltree = { workspace = true }

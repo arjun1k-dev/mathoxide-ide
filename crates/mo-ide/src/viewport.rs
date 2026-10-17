@@ -60,7 +60,7 @@ impl ViewportPanel {
         }
 
         camera.width = target_w as f32;
-        // Keep camera.height in scene units
+        camera.height = target_h as f32;
 
         // Evaluate scene state at current time
         let mut state = if let Some(tl) = timeline {
