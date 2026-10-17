@@ -3,7 +3,7 @@
 ## 1. Executive Summary & Status
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
-* **Core Philosophy**: A pure-Rust, hardware-accelerated mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency.
+* **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM).
 * **Build & Test Health**: **51 workspace unit tests pass with zero errors and zero compiler warnings.**
   ```
   mo-core:        34 passed
@@ -215,7 +215,12 @@ If you are the incoming agent picking up the codebase, here is your concrete, pr
 
 ## 8. Instructions for Future Agents & Developers
 
+* **Hardware Target & Constraints (CRITICAL)**:
+  - The user's system runs on **integrated graphics with ~128 MB VRAM** (Intel/AMD iGPU), NOT a dedicated discrete GPU.
+  - The existing lightweight WGPU shader pipeline (`fill.wgsl`, `stroke.wgsl`) is completely handleable for this system and should remain as-is.
+  - **DO NOT force or assume heavy discrete GPU features**: Do NOT introduce heavy compute shaders, giant 4K/8K texture buffers, complex shadow cascades, or heavy game engines (e.g. Bevy / heavy render graphs) that would overwhelm 128 MB VRAM.
+  - Keep geometry procedural, buffers lean and re-usable, memory allocations minimal, and CPU/iGPU execution smooth and lightweight.
 * **Preserve Documentation & Comments**: Always maintain existing comments and docstrings.
 * **Keep Asset Isolation**: When creating new mathematical animations, always write the individual component in `assets/<name>.moa` first, test it in isolation, and then import it into a composition.
 * **Version Control**: Keep committing clean, self-contained milestones to git (`main` branch) to prevent regressions.
-* **User Preferences (Arjun)**: Direct, mechanism-first, no fluff. Keep the engine native pure Rust, GPU-first, and lightning fast.
+* **User Preferences (Arjun)**: Direct, mechanism-first, no fluff. Keep the engine native pure Rust, lightweight, and responsive on standard laptop hardware with integrated graphics.
