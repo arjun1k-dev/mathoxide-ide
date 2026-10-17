@@ -1,0 +1,29 @@
+// Sine wave graphing demonstration in MathOxide (.moa DSL)
+// Renders coordinate axes with ticks & arrowheads, vector title text,
+// animated sine curve creation, and smooth morphing to cosine.
+
+// Coordinate axes with X in [-6, 6] and Y in [-2.5, 2.5]
+axes ax at (0, -0.3) x=(-6, 6, 1) y=(-2.5, 2.5, 1) w=11 h=5 stroke=#555566 sw=2;
+
+// Sine wave function plotted along axes
+func wave on=ax expr="sin(x)" from=-6 to=6 stroke=#58C4DD sw=4;
+
+// Target cosine wave for smooth morphing transform
+func wave2 on=ax expr="cos(x)" from=-6 to=6 stroke=#FC6255 sw=4;
+
+// Vector text titles
+text title text="y = sin(x)" at (0, 3.2) size=0.85 stroke=white fill=white;
+text title2 text="y = cos(x)" at (0, 3.2) size=0.85 stroke=#FC6255 fill=#FC6255;
+
+// Origin indicator
+dot origin_dot at (0, -0.3) r=0.08 color=#FFFF00;
+
+// Animation sequence
+play write(title) 1.2s smooth;
+play showCreation(ax) 1.5s smooth;
+play fadeIn(origin_dot) 0.5s;
+play showCreation(wave) 2.5s smooth;
+wait 0.5s;
+play transform(title, title2) 1.2s smooth;
+play transform(wave, wave2) 2.0s smooth;
+wait 1.0s;

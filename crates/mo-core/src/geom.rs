@@ -90,6 +90,89 @@ pub fn line(from: Vec3, to: Vec3, stroke: [f32; 4], stroke_width: f32) -> VGroup
     g
 }
 
+pub fn square(side: f32, center: Vec3, fill: [f32; 4], stroke: [f32; 4], stroke_width: f32) -> VGroup {
+    rect(side, side, center, fill, stroke, stroke_width)
+}
+
+pub fn dot(center: Vec3, radius: f32, fill: [f32; 4]) -> VGroup {
+    circle(radius, center, fill, fill, 0.0)
+}
+
+pub fn arrow(
+    from: Vec3,
+    to: Vec3,
+    stroke: [f32; 4],
+    stroke_width: f32,
+    tip_length: f32,
+    tip_width: f32,
+) -> VGroup {
+    let mut g = VGroup::new();
+    let delta = to - from;
+    let dist = delta.length();
+    if dist < 1e-4 {
+        return g;
+    }
+    let dir = delta / dist;
+    let perp = Vec3::new(-dir.y, dir.x, 0.0);
+
+    let tip_len = tip_length.min(dist * 0.5);
+    let shaft_end = to - dir * (tip_len * 0.8);
+
+    // Shaft
+    let start_idx = g.points.len();
+    g.start_subpath(from);
+    g.add_curve((from + shaft_end) * 0.5, shaft_end);
+    for p in &mut g.points[start_idx..] {
+        p.fill_rgba = [0.0; 4];
+        p.stroke_rgba = stroke;
+        p.stroke_width = stroke_width;
+    }
+
+    // Tip: filled triangle
+    let tip_base = to - dir * tip_len;
+    let tip_left = tip_base + perp * (tip_width * 0.5);
+    let tip_right = tip_base - perp * (tip_width * 0.5);
+
+    let tip_start_idx = g.points.len();
+    g.start_subpath(tip_left);
+    g.add_curve((tip_left + to) * 0.5, to);
+    g.add_curve((to + tip_right) * 0.5, tip_right);
+    g.add_curve((tip_right + tip_left) * 0.5, tip_left);
+    for p in &mut g.points[tip_start_idx..] {
+        p.fill_rgba = stroke;
+        p.stroke_rgba = stroke;
+        p.stroke_width = stroke_width;
+    }
+
+    g
+}
+
+pub fn polygon(
+    vertices: &[Vec3],
+    fill: [f32; 4],
+    stroke: [f32; 4],
+    stroke_width: f32,
+) -> VGroup {
+    let mut g = VGroup::new();
+    let n = vertices.len();
+    if n < 3 {
+        return g;
+    }
+    g.start_subpath(vertices[0]);
+    for i in 1..=n {
+        let prev = vertices[i - 1];
+        let cur = vertices[i % n];
+        let handle = (prev + cur) * 0.5;
+        g.add_curve(handle, cur);
+    }
+    for p in &mut g.points {
+        p.fill_rgba = fill;
+        p.stroke_rgba = stroke;
+        p.stroke_width = stroke_width;
+    }
+    g
+}
+
 pub fn text_placeholder(width: f32, height: f32) -> VGroup {
     rect(width, height, Vec3::ZERO, color::hex("#33333388"), color::WHITE, 2.0)
 }
@@ -105,5 +188,22 @@ mod tests {
         let (min, max) = c.bounds();
         assert!((max[0] - 2.0).abs() < 0.01);
         assert!((min[0] + 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn arrow_shape() {
+        let a = arrow(Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0), color::RED, 4.0, 0.4, 0.25);
+        assert_eq!(a.subpaths.len(), 2); // shaft + tip
+        let (_, max) = a.bounds();
+        assert!((max[0] - 3.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn dot_shape() {
+        let d = dot(Vec3::new(1.0, 2.0, 0.0), 0.1, color::YELLOW);
+        assert_eq!(d.curve_count(), CIRCLE_SEGMENTS);
+        let c = d.center();
+        assert!((c.x - 1.0).abs() < 0.01);
+        assert!((c.y - 2.0).abs() < 0.01);
     }
 }

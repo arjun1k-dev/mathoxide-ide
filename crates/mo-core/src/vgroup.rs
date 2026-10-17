@@ -124,7 +124,11 @@ impl VGroup {
             let f0 = if i == start_curve { (a * total - i as f32).max(0.0) } else { 0.0 };
             let f1 = if i + 1 == end_curve { (b * total - i as f32).min(1.0) } else { 1.0 };
             let [q0, q1, q2] = partial_quadratic(&[p0, p1, p2], f0, f1);
-            if out.subpaths.is_empty() {
+            let need_new_subpath = match out.points.last() {
+                None => true,
+                Some(last) => Vec3::from(last.point).distance_squared(q0) > 1e-4,
+            };
+            if need_new_subpath {
                 out.start_subpath(q0);
             }
             out.add_curve(q1, q2);

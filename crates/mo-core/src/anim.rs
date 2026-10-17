@@ -67,6 +67,10 @@ pub fn sample(anim: &TimedAnim, snapshot: &VGroup, target: &VGroup, t: f32) -> O
                     }
                     pt.stroke_rgba = target.points[i].stroke_rgba;
                     pt.stroke_width = target.points[i].stroke_width;
+                    if (pt.stroke_width <= 0.0 || pt.stroke_rgba[3] <= 0.0) && target.points[i].fill_rgba[3] > 0.0 {
+                        pt.stroke_rgba = target.points[i].fill_rgba;
+                        pt.stroke_width = 2.0;
+                    }
                 }
             }
             Some(p)

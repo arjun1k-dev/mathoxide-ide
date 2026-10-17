@@ -14,11 +14,17 @@ pub fn highlight_moa(ctx: &egui::Context, text: &str) -> egui::text::LayoutJob {
     let color_number = Color32::from_rgb(255, 158, 100);       // Orange
     let color_comment = Color32::from_rgb(108, 117, 137);      // Muted slate
 
-    let keywords = ["play", "wait", "at", "from", "to", "r", "w", "h", "fill", "stroke", "sw", "size"];
-    let types = ["circle", "rect", "line", "text", "Circle", "Rect", "Line", "Text"];
+    let keywords = [
+        "play", "wait", "at", "from", "to", "r", "w", "h", "fill", "stroke", "sw", "size",
+        "on", "expr", "f", "samples", "side", "tip_len", "tip_w", "color",
+    ];
+    let types = [
+        "circle", "rect", "line", "text", "axes", "func", "plot", "graph", "dot", "square", "arrow", "polygon",
+        "Circle", "Rect", "Line", "Text", "Axes", "Func", "Plot", "Graph", "Dot", "Square", "Arrow", "Polygon",
+    ];
     let anims = [
-        "showCreation", "fadeIn", "fadeOut", "grow", "rotate", "transform",
-        "ShowCreation", "FadeIn", "FadeOut", "Grow", "Rotate", "Transform",
+        "showCreation", "write", "fadeIn", "fadeOut", "grow", "growFromCenter", "rotate", "transform", "replacementTransform",
+        "ShowCreation", "Write", "FadeIn", "FadeOut", "Grow", "GrowFromCenter", "Rotate", "Transform", "ReplacementTransform",
     ];
     let rates = [
         "linear", "smooth", "rushInto", "rushFrom", "slowInto", "thereAndBack",

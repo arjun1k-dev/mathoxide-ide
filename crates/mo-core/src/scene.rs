@@ -75,13 +75,60 @@ pub struct Player;
 impl Player {
     /// State of all visible mobjects at time `t`.
     pub fn state_at(tl: &Timeline, t: f32) -> HashMap<String, VGroup> {
+        let mut intro_times: HashMap<String, f32> = HashMap::new();
+        let mut played_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut transform_targets: Vec<VGroup> = Vec::new();
+
+        let mut time_cur = 0.0;
+        for s in &tl.stmts {
+            match s {
+                Stmt::Play(ta) => {
+                    let id = ta.anim.target_id().to_string();
+                    played_ids.insert(id.clone());
+                    if matches!(
+                        ta.anim,
+                        Animation::ShowCreation { .. }
+                            | Animation::FadeIn { .. }
+                            | Animation::Grow { .. }
+                    ) {
+                        intro_times.entry(id).or_insert(time_cur);
+                    }
+                    if let Animation::Transform { target, .. } = &ta.anim {
+                        transform_targets.push(target.clone());
+                    }
+                    time_cur += ta.run_time;
+                }
+                Stmt::Wait(dur) => {
+                    time_cur += dur;
+                }
+                Stmt::Decl { .. } => {}
+            }
+        }
+
         let mut state: HashMap<String, VGroup> = HashMap::new();
+        for stmt in &tl.stmts {
+            if let Stmt::Decl { id, obj } = stmt {
+                // Pure transform targets (never played directly, match a transform target)
+                // are shape definitions only, not initial scene objects.
+                let is_pure_target = !played_ids.contains(id) && transform_targets.iter().any(|tg| tg == obj);
+                if is_pure_target {
+                    continue;
+                }
+
+                if let Some(&intro_t) = intro_times.get(id) {
+                    if t >= intro_t {
+                        state.insert(id.clone(), obj.clone());
+                    }
+                } else {
+                    state.insert(id.clone(), obj.clone());
+                }
+            }
+        }
+
         let mut t_cursor = 0.0;
         for stmt in &tl.stmts {
             match stmt {
-                Stmt::Decl { id, obj } => {
-                    state.insert(id.clone(), obj.clone());
-                }
+                Stmt::Decl { .. } => {}
                 Stmt::Wait(dur) => {
                     t_cursor += dur;
                     if t_cursor > t {

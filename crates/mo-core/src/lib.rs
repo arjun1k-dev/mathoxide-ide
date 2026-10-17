@@ -6,8 +6,14 @@ pub mod anim;
 pub mod scene;
 pub mod camera;
 pub mod text;
+pub mod curve;
+pub mod expr;
+pub mod axes;
 
 pub use camera::{Camera, FrameUniforms};
 pub use scene::{Player, Timeline, Stmt};
 pub use vgroup::{VmPoint, VGroup};
 pub use rate::RateFn;
+pub use axes::Axes;
+pub use curve::{approx_smooth_quadratic_bezier_handles, smooth_curve_from_points};
+pub use expr::Expr;

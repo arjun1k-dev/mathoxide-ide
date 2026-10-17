@@ -21,6 +21,7 @@ pub struct Diag {
 enum Tok {
     Ident(String),
     Num(f32),
+    Str(String),
     Hash(String), // hex digits after '#'
     LParen,
     RParen,
@@ -152,6 +153,36 @@ impl<'a> Lexer<'a> {
                 }
             }
             Tok::Hash(s)
+        } else if c == b'"' {
+            self.bump();
+            let mut s = String::new();
+            let mut closed = false;
+            while let Some(ch) = self.bump() {
+                if ch == b'"' {
+                    closed = true;
+                    break;
+                } else if ch == b'\\' {
+                    if let Some(next) = self.bump() {
+                        match next {
+                            b'n' => s.push('\n'),
+                            b't' => s.push('\t'),
+                            b'\\' => s.push('\\'),
+                            b'"' => s.push('"'),
+                            other => s.push(other as char),
+                        }
+                    }
+                } else {
+                    s.push(ch as char);
+                }
+            }
+            if !closed {
+                return Err(Diag {
+                    line,
+                    col,
+                    message: "unterminated string literal".into(),
+                });
+            }
+            Tok::Str(s)
         } else {
             self.bump();
             match c {
@@ -175,11 +206,13 @@ impl<'a> Lexer<'a> {
 
 // -- Parser -------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Val {
     F(f32),
     V(Vec3),
     C([f32; 4]),
+    S(String),
+    Ident(String),
 }
 
 #[derive(Debug)]
@@ -238,6 +271,7 @@ impl P {
         let (l, c) = self.pos();
         match self.bump() {
             Some(Tok::Num(f)) => Ok(Val::F(f)),
+            Some(Tok::Str(s)) => Ok(Val::S(s)),
             Some(Tok::LParen) => {
                 let mut xs = Vec::new();
                 loop {
@@ -269,9 +303,13 @@ impl P {
             Some(Tok::Hash(s)) => color::parse(&format!("#{s}"))
                 .map(Val::C)
                 .ok_or_else(|| Diag { line: l, col: c, message: format!("bad color `#{s}`") }),
-            Some(Tok::Ident(s)) => color::parse(&s)
-                .map(Val::C)
-                .ok_or_else(|| Diag { line: l, col: c, message: format!("unknown color `{s}`") }),
+            Some(Tok::Ident(s)) => {
+                if let Some(c) = color::parse(&s) {
+                    Ok(Val::C(c))
+                } else {
+                    Ok(Val::Ident(s))
+                }
+            }
             other => Err(Diag { line: l, col: c, message: format!("expected a value, got {other:?}") }),
         }
     }
@@ -285,6 +323,12 @@ impl P {
         loop {
             match self.peek() {
                 Some(Tok::Semi) | None => break,
+                Some(Tok::Str(s)) => {
+                    let s = s.clone();
+                    self.idx += 1;
+                    params.push(("text".into(), Val::S(s)));
+                    self.eat(&Tok::Comma);
+                }
                 Some(Tok::Ident(key)) => {
                     let key = key.clone();
                     self.idx += 1;
@@ -393,40 +437,123 @@ fn get_c(params: &[(String, Val)], k: &str) -> Option<[f32; 4]> {
     })
 }
 
-fn build_object(kind: &str, params: &[(String, Val)]) -> Result<VGroup, String> {
-    let fill = get_c(params, "fill").unwrap_or([0.0; 4]);
-    let stroke = get_c(params, "stroke").unwrap_or(color::BLUE);
+fn get_s(params: &[(String, Val)], k: &str) -> Option<String> {
+    params.iter().find(|(key, _)| key == k).and_then(|(_, v)| match v {
+        Val::S(s) | Val::Ident(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn build_object(
+    kind: &str,
+    name: &str,
+    params: &[(String, Val)],
+    axes_map: &mut std::collections::HashMap<String, mo_core::Axes>,
+) -> Result<VGroup, String> {
+    let fill = get_c(params, "fill").or_else(|| get_c(params, "color")).unwrap_or([0.0; 4]);
+    let stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::BLUE);
     let sw = get_f(params, "sw").unwrap_or(4.0);
     let at = get_v(params, "at").unwrap_or(Vec3::ZERO);
-    Ok(match kind {
-        "circle" => mo_core::geom::circle(get_f(params, "r").unwrap_or(1.0), at, fill, stroke, sw),
-        "rect" => mo_core::geom::rect(
+
+    match kind {
+        "circle" => Ok(mo_core::geom::circle(get_f(params, "r").unwrap_or(1.0), at, fill, stroke, sw)),
+        "dot" => {
+            let dot_color = get_c(params, "fill").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let r = get_f(params, "r").unwrap_or(0.08);
+            Ok(mo_core::geom::dot(at, r, dot_color))
+        }
+        "rect" => Ok(mo_core::geom::rect(
             get_f(params, "w").unwrap_or(2.0),
             get_f(params, "h").unwrap_or(1.0),
             at,
             fill,
             stroke,
             sw,
-        ),
-        "line" => mo_core::geom::line(
+        )),
+        "square" => {
+            let side = get_f(params, "side")
+                .or_else(|| get_f(params, "s"))
+                .or_else(|| get_f(params, "r"))
+                .unwrap_or(2.0);
+            Ok(mo_core::geom::square(side, at, fill, stroke, sw))
+        }
+        "line" => Ok(mo_core::geom::line(
             get_v(params, "from").unwrap_or(Vec3::ZERO),
             get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)),
             stroke,
             sw,
-        ),
-        "text" => mo_core::text::text("", get_f(params, "size").unwrap_or(1.0)),
-        other => return Err(format!("unknown object kind `{other}`")),
-    })
+        )),
+        "arrow" => {
+            let tip_len = get_f(params, "tip_len").unwrap_or(0.35);
+            let tip_w = get_f(params, "tip_w").unwrap_or(0.2);
+            let arrow_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(stroke);
+            Ok(mo_core::geom::arrow(
+                get_v(params, "from").unwrap_or(Vec3::ZERO),
+                get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)),
+                arrow_stroke,
+                sw,
+                tip_len,
+                tip_w,
+            ))
+        }
+        "axes" => {
+            let x_range = get_v(params, "x").map(|v| (v.x, v.y, v.z)).unwrap_or((-6.0, 6.0, 1.0));
+            let y_range = get_v(params, "y").map(|v| (v.x, v.y, v.z)).unwrap_or((-3.0, 3.0, 1.0));
+            let width = get_f(params, "w").unwrap_or(10.0);
+            let height = get_f(params, "h").unwrap_or(5.0);
+            let axes_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#555566"));
+            let axes_sw = get_f(params, "sw").unwrap_or(2.0);
+            let axes = mo_core::Axes::new(x_range, y_range, width, height, at);
+            let vg = axes.to_vgroup(axes_stroke, axes_sw);
+            axes_map.insert(name.to_string(), axes);
+            Ok(vg)
+        }
+        "func" | "plot" | "graph" => {
+            let expr_str = get_s(params, "expr")
+                .or_else(|| get_s(params, "f"))
+                .ok_or_else(|| "func requires `expr=\"...\"` or `f=\"...\"`".to_string())?;
+            let expr = mo_core::Expr::parse(&expr_str)
+                .map_err(|e| format!("expression error in `{expr_str}`: {e}"))?;
+
+            let axes = match get_s(params, "on") {
+                Some(ax_name) => axes_map
+                    .get(&ax_name)
+                    .ok_or_else(|| format!("axes `{ax_name}` not found for plot"))?
+                    .clone(),
+                None => mo_core::Axes::default(),
+            };
+
+            let from_x = get_f(params, "from").unwrap_or(axes.x_range.0);
+            let to_x = get_f(params, "to").unwrap_or(axes.x_range.1);
+            let samples = get_f(params, "samples").unwrap_or(120.0) as usize;
+            let plot_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#58C4DD"));
+            let plot_sw = get_f(params, "sw").unwrap_or(4.0);
+
+            Ok(axes.plot(|x| expr.eval(x), from_x, to_x, samples, plot_stroke, plot_sw))
+        }
+        "text" => {
+            let text_str = get_s(params, "text").or_else(|| get_s(params, "content")).unwrap_or_default();
+            let size = get_f(params, "size").unwrap_or(1.0);
+            let text_fill = get_c(params, "fill").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let text_stroke = get_c(params, "stroke").unwrap_or(text_fill);
+            let text_sw = get_f(params, "sw").unwrap_or(1.5);
+            let mut g = mo_core::text::text_styled(&text_str, size, text_fill, text_stroke, text_sw);
+            g.shift(at);
+            Ok(g)
+        }
+        other => Err(format!("unknown object kind `{other}`")),
+    }
 }
 
 fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
     // transform(c, c2) resolves against objects declared so far.
     let mut declared: std::collections::HashMap<String, VGroup> = Default::default();
+    let mut axes_map: std::collections::HashMap<String, mo_core::Axes> = Default::default();
     let mut tl = Timeline { stmts: Vec::new() };
     for raw in raws {
         match raw {
             RawStmt::Decl { kind, name, params } => {
-                let obj = build_object(&kind, &params)?;
+                let obj = build_object(&kind, &name, &params, &mut axes_map)?;
                 declared.insert(name.clone(), obj.clone());
                 tl.stmts.push(Stmt::Decl { id: name, obj });
             }
@@ -448,7 +575,7 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                     ("rotate", [id]) => {
                         Animation::Rotate { id: id.clone(), angle: std::f32::consts::PI }
                     }
-                    ("transform", [id, to]) => {
+                    ("transform", [id, to]) | ("replacementTransform", [id, to]) => {
                         let target = declared
                             .get(to)
                             .ok_or_else(|| format!("transform target `{to}` not declared yet"))?
@@ -559,5 +686,24 @@ mod tests {
     fn diag_position_accurate() {
         let diags = parse("circle a r=1;\nbroken % thing;").unwrap_err();
         assert_eq!(diags[0].line, 2);
+    }
+
+    #[test]
+    fn parses_graphing_and_text() {
+        let src = r#"
+            axes ax at (0,0) x=(-6,6,1) y=(-3,3,1) w=10 h=5 stroke=#555566 sw=2;
+            func wave on=ax expr="sin(x)" from=-6 to=6 stroke=#58C4DD sw=4;
+            func wave2 on=ax expr="cos(x)" from=-6 to=6 stroke=#FC6255 sw=4;
+            text title text="y = sin(x)" at (0, 3.2) size=0.8 stroke=white fill=white;
+            dot pt at (0,0) r=0.1 color=yellow;
+            arrow arr from (0,0) to (2,2) stroke=red;
+            play showCreation(ax) 1.5s smooth;
+            play write(title) 1.0s smooth;
+            play showCreation(wave) 2.0s smooth;
+            play transform(wave, wave2) 1.5s smooth;
+        "#;
+        let tl = parse(src).expect("parses sine wave graphing demo");
+        assert_eq!(tl.duration(), 6.0);
+        assert_eq!(tl.stmts.len(), 10);
     }
 }

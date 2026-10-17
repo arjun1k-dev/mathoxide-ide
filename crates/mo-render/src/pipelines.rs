@@ -866,15 +866,9 @@ fn prepare_gpu_records(g: &VGroup) -> (Vec<GpuPointRecord>, u32) {
 
         // Between subpaths, insert a null curve separator (controls[0] == controls[1])
         if sp_idx > 0 && !records.is_empty() {
-            let last_rec = *records.last().unwrap();
-            records.push(last_rec);
-            let next_p = sp_pts[0];
-            records.push(GpuPointRecord {
-                point: next_p.point,
-                stroke_rgba: next_p.stroke_rgba,
-                stroke_width: next_p.stroke_width,
-                subpath_range: [0.0, 0.0],
-            });
+            let mut sep_handle = *records.last().unwrap();
+            sep_handle.subpath_range = [0.0, 0.0];
+            records.push(sep_handle);
             total_curves += 1;
         }
 
