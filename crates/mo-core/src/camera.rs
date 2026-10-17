@@ -69,12 +69,27 @@ impl Camera {
         self.frame_height = (self.frame_height / factor).clamp(0.1, 100.0);
     }
 
+    /// Aspect ratio (width / height).
+    pub fn aspect_ratio(&self) -> f32 {
+        self.width / self.height
+    }
+
     /// Convert screen pixel coords to scene coords on the z=0 plane.
     pub fn screen_to_scene(&self, x: f32, y: f32) -> Vec3 {
-        let aspect = self.width / self.height;
+        let aspect = self.aspect_ratio();
         let sx = (x / self.width * 2.0 - 1.0) * self.frame_height * aspect / 2.0;
         let sy = (1.0 - y / self.height * 2.0) * self.frame_height / 2.0;
         Vec3::new(self.center.x + sx, self.center.y + sy, 0.0)
+    }
+
+    /// Convert scene coords on the z=0 plane to screen pixel coords.
+    pub fn scene_to_screen(&self, x: f32, y: f32) -> glam::Vec2 {
+        let aspect = self.aspect_ratio();
+        let half_w = self.frame_height * aspect / 2.0;
+        let half_h = self.frame_height / 2.0;
+        let px = ((x - self.center.x) / half_w + 1.0) * 0.5 * self.width;
+        let py = (1.0 - (y - self.center.y) / half_h) * 0.5 * self.height;
+        glam::Vec2::new(px, py)
     }
 }
 

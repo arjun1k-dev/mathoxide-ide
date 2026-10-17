@@ -46,4 +46,21 @@ mod tests {
         assert_eq!(corner_pixel[1], 0);
         assert_eq!(corner_pixel[2], 0);
     }
+
+    #[test]
+    fn test_render_vector_text() {
+        let renderer = Renderer::offscreen(320, 240).expect("offscreen renderer");
+        let mut state = HashMap::new();
+
+        let t = mo_core::text::text("MO", 1.5);
+        state.insert("title".to_string(), t);
+
+        let img = renderer.render(&state);
+        assert_eq!(img.width(), 320);
+        assert_eq!(img.height(), 240);
+
+        // Verify that some non-background pixels were rendered
+        let has_text_pixels = img.pixels().any(|p| p[0] > 0 || p[1] > 0 || p[2] > 0);
+        assert!(has_text_pixels, "Rendered image should contain vector text pixels");
+    }
 }

@@ -36,6 +36,36 @@ impl Timeline {
         }
         d
     }
+
+    /// Return all declared named mobjects and their initial geometries.
+    pub fn initial_objects(&self) -> HashMap<String, VGroup> {
+        let mut m = HashMap::new();
+        for s in &self.stmts {
+            if let Stmt::Decl { id, obj } = s {
+                m.insert(id.clone(), obj.clone());
+            }
+        }
+        m
+    }
+
+    /// Return timed animations with their absolute start time and duration.
+    pub fn timed_anims(&self) -> Vec<(f32, &TimedAnim)> {
+        let mut list = Vec::new();
+        let mut t = 0.0;
+        for s in &self.stmts {
+            match s {
+                Stmt::Play(a) => {
+                    list.push((t, a));
+                    t += a.run_time;
+                }
+                Stmt::Wait(dur) => {
+                    t += *dur;
+                }
+                Stmt::Decl { .. } => {}
+            }
+        }
+        list
+    }
 }
 
 /// Evaluates a Timeline at arbitrary time t, producing visible render state.

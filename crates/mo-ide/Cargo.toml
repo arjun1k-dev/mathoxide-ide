@@ -10,3 +10,14 @@ path = "src/main.rs"
 
 [dependencies]
 mo-core = { workspace = true }
+mo-render = { workspace = true }
+mo-dsl = { workspace = true }
+mo-moab = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+egui-wgpu = { workspace = true }
+wgpu = { workspace = true }
+notify = { workspace = true }
+glam = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

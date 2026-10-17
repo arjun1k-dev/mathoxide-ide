@@ -831,6 +831,10 @@ impl Renderer {
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
     }
+
+    pub fn target_view(&self) -> &wgpu::TextureView {
+        &self.target
+    }
 }
 
 /// Pack `VGroup` subpaths into GPU-ready `GpuPointRecord`s, setting `subpath_range`
