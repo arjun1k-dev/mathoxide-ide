@@ -112,17 +112,17 @@ impl VGroup {
         let mut out = VGroup::new();
         let curves: Vec<[Vec3; 3]> = self.curves().collect();
         let total = curves.len() as f32;
-        if total == 0.0 {
+        if total == 0.0 || a >= b {
             return out;
         }
-        let start_curve = (a * total) as usize;
-        let end_curve = ((b * total) as usize).min(curves.len());
+        let start_curve = (a * total).floor() as usize;
+        let end_curve = ((b * total).ceil() as usize).min(curves.len());
         if start_curve >= end_curve {
             return out;
         }
         for (i, &[p0, p1, p2]) in curves.iter().enumerate().take(end_curve).skip(start_curve) {
-            let f0 = if i == start_curve { a * total - i as f32 } else { 0.0 };
-            let f1 = if i + 1 == end_curve { b * total - i as f32 } else { 1.0 };
+            let f0 = if i == start_curve { (a * total - i as f32).max(0.0) } else { 0.0 };
+            let f1 = if i + 1 == end_curve { (b * total - i as f32).min(1.0) } else { 1.0 };
             let [q0, q1, q2] = partial_quadratic(&[p0, p1, p2], f0, f1);
             if out.subpaths.is_empty() {
                 out.start_subpath(q0);

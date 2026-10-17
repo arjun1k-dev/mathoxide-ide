@@ -41,15 +41,20 @@ impl Default for Camera {
 impl Camera {
     pub fn uniforms(&self) -> FrameUniforms {
         let aspect = self.width / self.height;
-        let eye = self.center + Vec3::Z * 20.0;
-        let view = Mat4::look_at_rh(eye, self.center, Vec3::Y);
+        let focal_distance = 0.5 * self.frame_height / (self.fov / 2.0).tan();
+        let eye = self.center + Vec3::Z * focal_distance;
+        let view = Mat4::from_translation(-self.center);
         FrameUniforms {
             view,
-            frame_rescale_factors: [2.0 / (self.frame_height * aspect), 2.0 / self.frame_height, 1.0],
+            frame_rescale_factors: [
+                2.0 / (self.frame_height * aspect),
+                2.0 / self.frame_height,
+                1.0 / focal_distance,
+            ],
             frame_scale: self.frame_height / 2.0,
             camera_position: eye.to_array(),
             pixel_size: self.frame_height / self.height,
-            light_position: [10.0, 10.0, 20.0],
+            light_position: (eye + Vec3::new(-10.0, 10.0, 0.0)).to_array(),
             _pad: 0.0,
         }
     }

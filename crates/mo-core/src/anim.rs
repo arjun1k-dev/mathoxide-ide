@@ -62,6 +62,9 @@ pub fn sample(anim: &TimedAnim, snapshot: &VGroup, target: &VGroup, t: f32) -> O
             for (i, pt) in p.points.iter_mut().enumerate() {
                 if i < target.points.len() {
                     pt.fill_rgba = target.points[i].fill_rgba;
+                    if a < 1.0 {
+                        pt.fill_rgba[3] = 0.0;
+                    }
                     pt.stroke_rgba = target.points[i].stroke_rgba;
                     pt.stroke_width = target.points[i].stroke_width;
                 }
@@ -116,7 +119,6 @@ fn fade(g: &mut VGroup, factor: f32, _stroke_only: bool) {
 mod tests {
     use super::*;
     use crate::geom;
-    use crate::rate;
 
     #[test]
     fn transform_sampling() {

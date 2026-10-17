@@ -80,15 +80,22 @@ impl App {
         cam
     }
 
-    fn draw(&self) {
-        let (Some(window), Some(renderer), Some(surface), Some(config)) =
-            (&self.window, &self.renderer, &self.surface, &self.config)
+    fn draw(&mut self) {
+        let Some(window) = self.window.clone() else { return };
+        let size = window.inner_size();
+        let w = size.width.max(1);
+        let h = size.height.max(1);
+        let cam = self.camera(w, h);
+        let state = self.current_state();
+
+        let (Some(renderer), Some(surface), Some(config)) =
+            (&mut self.renderer, &self.surface, &self.config)
         else {
             return;
         };
-        let size = window.inner_size();
-        let cam = self.camera(size.width, size.height);
-        let state = self.current_state();
+        if renderer.width() != w || renderer.height() != h {
+            renderer.resize(w, h);
+        }
         let mut encoder = renderer.device().create_command_encoder(&Default::default());
         renderer.draw_scene_pass(&state, &cam, &mut encoder);
         // Occluded/stale surfaces can fail to acquire — skip that frame instead of dying.
@@ -150,9 +157,11 @@ impl ApplicationHandler for App {
         .expect("device");
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps.formats.iter().copied().find(|f| !f.is_srgb())
+            .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: caps.formats[0],
+            format: surface_format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
@@ -161,8 +170,8 @@ impl ApplicationHandler for App {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let mut renderer = Renderer::new(device, queue, 1280, 720).expect("renderer");
-        renderer.set_present_format(caps.formats[0]);
+        let mut renderer = Renderer::new(device, queue, size.width.max(1), size.height.max(1)).expect("renderer");
+        renderer.set_present_format(surface_format);
         self.window = Some(window.clone());
         self.surface = Some(surface);
         self.config = Some(config);
@@ -175,12 +184,15 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => loop_.exit(),
             WindowEvent::Resized(size) => {
+                let w = size.width.max(1);
+                let h = size.height.max(1);
                 if let (Some(config), Some(surface), Some(renderer)) =
-                    (&mut self.config, &self.surface, &self.renderer)
+                    (&mut self.config, &self.surface, &mut self.renderer)
                 {
-                    config.width = size.width.max(1);
-                    config.height = size.height.max(1);
+                    config.width = w;
+                    config.height = h;
                     surface.configure(renderer.device(), config);
+                    renderer.resize(w, h);
                 }
             }
             WindowEvent::RedrawRequested => {
