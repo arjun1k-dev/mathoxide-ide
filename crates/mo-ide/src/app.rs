@@ -11,7 +11,7 @@ use mo_core::camera::Camera;
 use mo_core::scene::{Player, Timeline};
 use mo_render::Renderer;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub struct MathOxideApp {
@@ -72,16 +72,12 @@ impl MathOxideApp {
         camera.height = initial_h as f32;
         camera.frame_height = 8.0;
 
-        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project_dir = crate::assets::src_home();
         let asset_panel = AssetPanel::new(project_dir);
 
-        let path = initial_file.unwrap_or_else(|| PathBuf::from("examples/master_video.moa"));
-        let (code, actual_path, watcher) = if path.exists() {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let w = FileWatcher::new(&path).ok();
-            (content, Some(path), w)
-        } else if PathBuf::from("examples/demo.moa").exists() {
-            let p = PathBuf::from("examples/demo.moa");
+        // Most recently edited master across all video projects wins.
+        let path = initial_file.or_else(|| newest_master(&asset_panel.project_path));
+        let (code, actual_path, watcher) = if let Some(p) = path.filter(|p| p.exists()) {
             let content = std::fs::read_to_string(&p).unwrap_or_default();
             let w = FileWatcher::new(&p).ok();
             (content, Some(p), w)
@@ -241,8 +237,61 @@ impl MathOxideApp {
         }
     }
 
+    /// Folder of the active file's video project (parent of `master.moa`, or
+    /// the folder containing an `assets/` parent).
+    fn active_project(&self) -> Option<PathBuf> {
+        let path = self.file_path.as_ref()?;
+        crate::assets::project_of(path, &self.asset_panel.project_path)
+    }
+
+    /// Project's master.moa, if the project folder has one.
+    fn project_master(&self, project: &Path) -> Option<PathBuf> {
+        let m = project.join("master.moa");
+        m.exists().then_some(m)
+    }
+
+    /// Name of the active file's video project folder.
+    fn active_project_name(&self) -> Option<String> {
+        self.active_project()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+    }
+
+    /// Create a fresh video project: <name>/{master.moa, assets/}.
+    pub fn new_video(&mut self, raw_name: &str) {
+        let name: String = raw_name
+            .trim()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect();
+        if name.is_empty() {
+            self.set_status("Type a name for the new video first");
+            return;
+        }
+        let dir = self.asset_panel.project_path.join(&name);
+        if dir.exists() {
+            self.set_status(format!("Project `{name}` already exists — opening it"));
+            self.open_file(dir.join("master.moa"));
+            return;
+        }
+        if let Err(e) = std::fs::create_dir_all(dir.join("assets")) {
+            self.set_status(format!("Error creating project: {e}"));
+            return;
+        }
+        match std::fs::write(dir.join("master.moa"), new_master_template()) {
+            Ok(()) => {
+                self.open_file(dir.join("master.moa"));
+                self.asset_panel.rescan();
+                self.asset_panel.new_video_name.clear();
+                self.set_status(format!("Created video project `{name}`"));
+            }
+            Err(e) => self.set_status(format!("Error creating master: {e}")),
+        }
+    }
+
     pub fn new_asset(&mut self) {
-        let assets_dir = self.asset_panel.project_path.join("assets");
+        // Belongs to the active video project; fall back to the source home.
+        let project = self.active_project().unwrap_or_else(crate::assets::src_home);
+        let assets_dir = project.join("assets");
         let _ = std::fs::create_dir_all(&assets_dir);
         let mut idx = 1;
         let mut target = assets_dir.join(format!("asset_{idx}.moa"));
@@ -254,31 +303,31 @@ impl MathOxideApp {
         let template = new_asset_template();
         if let Err(e) = std::fs::write(&target, &template) {
             self.set_status(format!("Error creating asset: {e}"));
-        } else {
-            self.open_file(target);
-            self.asset_panel.rescan();
-            self.left_tab = 0;
-            self.set_status(format!("Created new asset asset_{idx}.moa"));
+            return;
         }
-    }
+        self.open_file(target.clone());
+        self.asset_panel.rescan();
+        self.left_tab = 0;
 
-    pub fn new_master(&mut self) {
-        let mut idx = 1;
-        let mut target = self.asset_panel.project_path.join(format!("composition_{idx}.moa"));
-        while target.exists() {
-            idx += 1;
-            target = self.asset_panel.project_path.join(format!("composition_{idx}.moa"));
+        // Wire the asset into the project's master automatically.
+        let stem = target.file_stem().unwrap_or_default().to_string_lossy().replace('-', "_");
+        let import_line = format!("import \"assets/{stem}.moa\" as {stem};");
+        if let Some(master) = self.project_master(&project) {
+            if let Ok(mut code) = std::fs::read_to_string(&master) {
+                if !code.contains(&import_line) {
+                    if !code.ends_with('\n') && !code.is_empty() {
+                        code.push('\n');
+                    }
+                    code.push_str(&import_line);
+                    code.push('\n');
+                    let _ = std::fs::write(&master, &code);
+                    self.asset_panel.rescan();
+                    self.set_status(format!("Created asset & wired import into {}", master.display()));
+                    return;
+                }
+            }
         }
-
-        let template = new_master_template();
-        if let Err(e) = std::fs::write(&target, &template) {
-            self.set_status(format!("Error creating composition: {e}"));
-        } else {
-            self.open_file(target);
-            self.asset_panel.rescan();
-            self.left_tab = 0;
-            self.set_status(format!("Created new composition composition_{idx}.moa"));
-        }
+        self.set_status(format!("Created asset {}", target.display()));
     }
 }
 
@@ -362,10 +411,11 @@ impl eframe::App for MathOxideApp {
                         self.new_asset();
                         ui.close_menu();
                     }
-                    if ui.button("New Master Composition...").clicked() {
-                        self.new_master();
-                        ui.close_menu();
-                    }
+                    ui.label(
+                        egui::RichText::new("New video: use 🎬 New Video in the Videos panel")
+                            .size(10.5)
+                            .italics(),
+                    );
                     ui.separator();
                     if ui.button("Open File... (Ctrl+O)").clicked() {
                         self.open_file_dialog();
@@ -392,9 +442,11 @@ impl eframe::App for MathOxideApp {
                     if ui.button("Export MP4 Video...").clicked() {
                         if let Some(tl) = &self.timeline {
                             let tl_clone = tl.clone();
+                            let default_name = self.active_project_name().unwrap_or_else(|| "render".into());
                             if let Some(out_path) = rfd::FileDialog::new()
                                 .add_filter("MP4 Video", &["mp4"])
-                                .set_file_name("render.mp4")
+                                .set_directory(crate::assets::out_home())
+                                .set_file_name(&format!("{default_name}.mp4"))
                                 .save_file()
                             {
                                 let dest_str = out_path.display().to_string();
@@ -409,9 +461,11 @@ impl eframe::App for MathOxideApp {
                         ui.close_menu();
                     }
                     if ui.button("Export .moab Bundle...").clicked() {
+                        let default_name = self.active_project_name().unwrap_or_else(|| "composition".into());
                         if let Some(out_path) = rfd::FileDialog::new()
                             .add_filter("MOAB Package", &["moab"])
-                            .set_file_name("composition.moab")
+                            .set_directory(crate::assets::out_home())
+                            .set_file_name(&format!("{default_name}.moab"))
                             .save_file()
                         {
                             if let Err(e) = export_moab(&self.editor_panel.code, &out_path) {
@@ -441,22 +495,19 @@ impl eframe::App for MathOxideApp {
                     }
                 });
 
-                ui.menu_button("Presets", |ui| {
-                    if ui.button("Master Video Composition (examples/master_video.moa)").clicked() {
-                        self.open_file(PathBuf::from("examples/master_video.moa"));
-                        ui.close_menu();
-                    }
-                    if ui.button("3D Orbit Showcase (examples/demo_3d.moa)").clicked() {
-                        self.open_file(PathBuf::from("examples/demo_3d.moa"));
-                        ui.close_menu();
-                    }
-                    if ui.button("LaTeX Showcase (examples/demo_latex.moa)").clicked() {
-                        self.open_file(PathBuf::from("examples/demo_latex.moa"));
-                        ui.close_menu();
-                    }
-                    if ui.button("Demo Scene (examples/demo.moa)").clicked() {
-                        self.open_file(PathBuf::from("examples/demo.moa"));
-                        ui.close_menu();
+                ui.menu_button("Examples", |ui| {
+                    let home = crate::assets::src_home();
+                    for (label, project) in [
+                        ("Master Video Composition", "master-showcase"),
+                        ("3D Orbit Showcase", "demo_3d"),
+                        ("LaTeX Showcase", "latex_showcase"),
+                        ("Demo Scene", "demo"),
+                    ] {
+                        let p = home.join(project).join("master.moa");
+                        if p.exists() && ui.button(format!("{label} ({})", home.join(project).display())).clicked() {
+                            self.open_file(p);
+                            ui.close_menu();
+                        }
                     }
                 });
 
@@ -607,11 +658,12 @@ impl eframe::App for MathOxideApp {
                                 AssetAction::NewAsset => {
                                     self.new_asset();
                                 }
-                                AssetAction::NewMaster => {
-                                    self.new_master();
+                                AssetAction::NewVideo => {
+                                    let name = self.asset_panel.new_video_name.clone();
+                                    self.new_video(&name);
                                 }
-                                AssetAction::ChangeProjectDir(folder) => {
-                                    self.set_status(format!("Project directory: {}", folder.display()));
+                                AssetAction::ChangeSrcHome(folder) => {
+                                    self.set_status(format!("Source folder: {}", folder.display()));
                                 }
                                 AssetAction::None => {}
                             }
@@ -745,8 +797,31 @@ fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<S
     }
 }
 
-fn compile_code(code: &str) -> (Option<Timeline>, Vec<mo_dsl::PlayOrigin>, Option<String>) {
-    match mo_dsl::parse_with_origins(code) {
+/// Most recently modified master.moa under the source home, if any.
+fn newest_master(src_root: &Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack = vec![src_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.file_name().map_or(false, |n| n == "master.moa") {
+                    let mtime = e.metadata().and_then(|m| m.modified()).ok();
+                    if let Some(t) = mtime {
+                        if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
+                            best = Some((t, p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn compile_code(code: &str) -> (Option<Timeline>, Vec<mo_dsl::PlayOrigin>, Option<String>) {    match mo_dsl::parse_with_origins(code) {
         Ok((tl, origins)) => (Some(tl), origins, None),
         Err(e) => (None, Vec::new(), Some(e.iter().map(|d| format!("{}:{}: {}", d.line, d.col, d.message)).collect::<Vec<_>>().join("\n"))),
     }
@@ -775,10 +850,10 @@ wait 0.5s;
 }
 
 fn new_master_template() -> String {
-    r#"// MathOxide Master Composition
-// Import and sequence modular assets across the timeline
-import "assets/euler_formula.moa" as euler at (0, 1.5);
-import "assets/sine_wave.moa" as sine at (0, -1.5);
+    r#"// MathOxide Video — master composition
+// Add assets with ➕ New Asset (auto-imports) or ➕ Import in the Videos panel.
+// Each import resolves relative to this file, e.g.:
+//   import "assets/intro.moa" as intro at (0, 0);
 
 wait 1s;
 "#.into()

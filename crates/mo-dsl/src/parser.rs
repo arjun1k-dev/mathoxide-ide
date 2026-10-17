@@ -469,6 +469,14 @@ impl P {
                         break;
                     }
                 }
+                // Numeric argument (e.g. the angle in `rotate(c, 1.5708)`).
+                Some(Tok::Num(f)) => {
+                    args.push(format!("{f}"));
+                    self.idx += 1;
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
                 Some(t) => return Err(self.err_here(&format!("unexpected `{t:?}` in animation args"))),
             }
         }
@@ -850,6 +858,10 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                     }
                     ("rotate", [id]) => {
                         Animation::Rotate { id: id.clone(), angle: std::f32::consts::PI }
+                    }
+                    ("rotate", [id, a]) => {
+                        let angle = a.parse::<f32>().unwrap_or(std::f32::consts::PI);
+                        Animation::Rotate { id: id.clone(), angle }
                     }
                     ("spinInFromNothing", [id]) => {
                         Animation::SpinInFromNothing { id: id.clone() }

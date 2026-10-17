@@ -1,8 +1,0 @@
-// Modular Asset: 3D Wireframe Cube with Axes
-axes3d ax at (0, 0) x=(-2.5, 2.5) y=(-2.5, 2.5) z=(-2, 2) sw=2;
-cube c at (0, 0) side=2.0 stroke=#58C4DD sw=2.5;
-
-play showCreation(ax) 1.2s smooth;
-play showCreation(c) 1.5s smooth;
-play rotate(c, 1.5708) 1.5s smooth;
-wait 0.5s;

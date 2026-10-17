@@ -11,13 +11,16 @@ Rust rewrite of ManimGL (reference source: /home/arjun/Downloads/manim-master). 
 - `crates/mo-cli` — `mo` binary: validate / render (mp4 via ffmpeg pipe) / compile / inspect.
 - `crates/mo-interactive`, `crates/mo-ide`, `crates/mo-mcp` — phases 2/3/5.
 
+## Project model
+
+One folder per video under `~/mathoxide/<project>/` containing `master.moa` + `assets/*.moa`. `import "assets/x.moa"` resolves relative to the importing file (`mo_dsl::parse_file`). Renders default to `~/Videos/mathoxide/<project>.mp4`. Each `play` carries provenance (`mo_dsl::PlayOrigin`) so the IDE can apply timeline edits back into the right asset files.
+
 ## Commands
 
 ```sh
 cargo test --workspace
-cargo run -p mo-cli -- render examples/demo.moa -o /tmp/demo.mp4
-cargo run -p mo-cli -- render examples/demo.moa --frame 1.0 -o /tmp/f1.png
-cargo run -p mo-cli -- compile examples/demo.moa -o /tmp/demo.moab
+cargo run -p mo-cli -- render ~/mathoxide/demo/master.moa                  # -> ~/Videos/mathoxide/demo.mp4
+cargo run -p mo-cli -- render ~/mathoxide/demo/master.moa --frame 1.0      # -> ~/Videos/mathoxide/demo.png
 cargo run -p mo-cli -- inspect /tmp/demo.moab
 ```
 

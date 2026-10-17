@@ -1,9 +1,0 @@
-// Modular Asset: Harmonic Sine Wave Plot
-axes ax at (0, 0) x=(-5, 5, 1) y=(-1.5, 1.5, 1) w=9 h=3.2 stroke=#445577 sw=2;
-func wave on=ax expr="sin(2*x)" from=-5 to=5 stroke=#58C4DD sw=2;
-tex label at (0, 2.0) text="f(x) = \sin(2x)" size=0.9 color=#58C4DD;
-
-play showCreation(ax) 1.0s smooth;
-play write(label) 0.8s smooth;
-play showCreation(wave) 1.5s smooth;
-wait 0.5s;

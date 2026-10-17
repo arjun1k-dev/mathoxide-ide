@@ -19,8 +19,9 @@ enum Cmd {
     /// Render a .moa file to mp4 (via ffmpeg subprocess) or PNG at a time.
     Render {
         file: String,
+        /// Output path. Defaults to ~/Videos/mathoxide/<stem>.png|.mp4
         #[arg(short, long)]
-        out: String,
+        out: Option<String>,
         /// Render a single frame at this time (seconds) as PNG.
         #[arg(long)]
         frame: Option<f32>,
@@ -46,8 +47,9 @@ enum Cmd {
     /// Compile .moa into a .moab bundle.
     Compile {
         file: String,
+        /// Output path. Defaults to ~/Videos/mathoxide/<stem>.moab
         #[arg(short, long)]
-        out: String,
+        out: Option<String>,
     },
     /// Inspect a .moab bundle: timeline and final state.
     Inspect { file: String },
@@ -57,22 +59,22 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Validate { file } => {
-            let src = std::fs::read_to_string(&file).context("read file")?;
-            match mo_dsl::parse(&src) {
-                Ok(tl) => {
+            match parse_scene(&file) {
+                Ok((tl, _)) => {
                     println!("OK — {} statements, {:.2}s", tl.stmts.len(), tl.duration());
                 }
-                Err(diags) => {
-                    for d in diags {
-                        eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                    }
+                Err(e) => {
+                    eprintln!("{e}");
                     std::process::exit(1);
                 }
             }
         }
         Cmd::Render { file, out, frame, width, height, fps, phi, theta, gamma } => {
-            let src = std::fs::read_to_string(&file).context("read file")?;
-            let tl = mo_dsl::parse(&src).map_err(|d| anyhow::anyhow!("{d:?}"))?;
+            let (tl, _origins) = parse_scene(&file)?;
+            let out = match out {
+                Some(o) => o,
+                None => default_out(&file, if frame.is_some() { "png" } else { "mp4" })?,
+            };
             let renderer = mo_render::Renderer::offscreen(width, height)?;
             let mut camera = mo_core::camera::Camera::default();
             camera.width = width as f32;
@@ -93,13 +95,16 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Preview { file } => {
-            let src = std::fs::read_to_string(&file).context("read file")?;
-            let tl = mo_dsl::parse(&src).map_err(|d| anyhow::anyhow!("{d:?}"))?;
+            let (tl, _origins) = parse_scene(&file)?;
             mo_interactive::preview(tl)?;
         }
         Cmd::Compile { file, out } => {
             let src = std::fs::read_to_string(&file).context("read file")?;
             let bytes = mo_moab::compile(&src)?;
+            let out = match out {
+                Some(o) => o,
+                None => default_out(&file, "moab")?,
+            };
             std::fs::write(&out, bytes)?;
             println!("compiled {file} -> {out}");
         }
@@ -168,4 +173,37 @@ fn render_video(
     ffmpeg.wait()?;
     println!("wrote {total} frames -> {out}");
     Ok(())
+}
+
+/// Parse a scene file with file-relative import resolution.
+fn parse_scene(path: &str) -> Result<(mo_core::scene::Timeline, Vec<mo_dsl::PlayOrigin>)> {
+    let p = std::path::Path::new(path);
+    mo_dsl::parse_file(p).map_err(|diags| {
+        anyhow::anyhow!(
+            "{}",
+            diags.iter().map(|d| format!("{}:{}:{}: {}", path, d.line, d.col, d.message)).collect::<Vec<_>>().join("\n")
+        )
+    })
+}
+
+/// Default output under ~/Videos/mathoxide/<file-stem>.<ext> (dir auto-created).
+fn default_out(file: &str, ext: &str) -> Result<String> {
+    let mut home = std::env::var_os("HOME").map(std::path::PathBuf::from).context("no HOME")?;
+    home.push("Videos");
+    home.push("mathoxide");
+    std::fs::create_dir_all(&home)?;
+    let p = std::path::Path::new(file);
+    // `master.moa` alone is ambiguous across projects — prefer the project
+    // folder name in that case (e.g. ~/mathoxide/lagrange/master.moa -> lagrange).
+    let stem = if p.file_name().map_or(false, |n| n == "master.moa") {
+        p.parent()
+            .and_then(|d| d.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "master".into())
+    } else {
+        p.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "render".into())
+    };
+    Ok(home.join(format!("{stem}.{ext}")).to_string_lossy().into_owned())
 }

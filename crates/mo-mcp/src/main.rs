@@ -297,41 +297,64 @@ fn timeline_json(tl: &mo_core::scene::Timeline) -> Value {
     json!(entries)
 }
 
+/// Index one .moa file into the asset listing (deduped by path).
+fn mcp_scan_file(path: &Path, seen: &mut std::collections::HashSet<PathBuf>, assets: &mut Vec<Value>) {
+    let path = path.to_path_buf();
+    if !seen.insert(path.clone()) {
+        return;
+    }
+    if let Ok(code) = std::fs::read_to_string(&path) {
+        let is_master = code.contains("import ");
+        let parsed = mo_dsl::parse_file(&path);
+        let duration = parsed.as_ref().map(|(tl, _)| tl.duration()).unwrap_or(0.0);
+        let timeline = parsed.map(|(tl, _)| timeline_json(&tl)).unwrap_or(json!([]));
+        let line_count = code.lines().count();
+        assets.push(json!({
+            "path": path.to_string_lossy(),
+            "filename": path.file_name().unwrap_or_default().to_string_lossy(),
+            "is_master": is_master,
+            "lines": line_count,
+            "duration": duration,
+            "timeline": timeline,
+        }));
+    }
+}
+
+/// Index all .moa files directly inside `dir` (non-recursive).
+fn mcp_scan_flat(dir: &Path, seen: &mut std::collections::HashSet<PathBuf>, assets: &mut Vec<Value>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "moa") {
+                mcp_scan_file(&path, seen, assets);
+            }
+        }
+    }
+}
+
 fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {    match name {
         "list_assets" => {
-            let base_dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(".");
+            // Default to the MathOxide source home (~/mathoxide) when present.
+            let default_dir = std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join("mathoxide"))
+                .filter(|p| p.is_dir())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".into());
+            let base_dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&default_dir);
             let project = PathBuf::from(base_dir);
-            let dirs = [project.join("assets"), project.join("examples"), project.clone()];
 
             let mut assets = Vec::new();
             let mut seen = std::collections::HashSet::new();
 
-            for dir in &dirs {
-                if !dir.exists() {
-                    continue;
-                }
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_file() && path.extension().map_or(false, |ext| ext == "moa") {
-                            if seen.insert(path.clone()) {
-                                if let Ok(code) = std::fs::read_to_string(&path) {
-                                    let is_master = code.contains("import ");
-                                    let parsed = mo_dsl::parse(&code);
-                                    let duration = parsed.as_ref().map(|tl| tl.duration()).unwrap_or(0.0);
-                                    let timeline = parsed.map(|tl| timeline_json(&tl)).unwrap_or(json!([]));
-                                    let line_count = code.lines().count();
-                                    assets.push(json!({
-                                        "path": path.to_string_lossy(),
-                                        "filename": path.file_name().unwrap_or_default().to_string_lossy(),
-                                        "is_master": is_master,
-                                        "lines": line_count,
-                                        "duration": duration,
-                                        "timeline": timeline,
-                                    }));
-                                }
-                            }
-                        }
+            mcp_scan_flat(&project, &mut seen, &mut assets);
+            mcp_scan_flat(&project.join("assets"), &mut seen, &mut assets);
+            mcp_scan_flat(&project.join("examples"), &mut seen, &mut assets);
+            if let Ok(projects) = std::fs::read_dir(&project) {
+                for proj in projects.flatten() {
+                    let p = proj.path();
+                    if p.is_dir() {
+                        mcp_scan_file(&p.join("master.moa"), &mut seen, &mut assets);
+                        mcp_scan_flat(&p.join("assets"), &mut seen, &mut assets);
                     }
                 }
             }

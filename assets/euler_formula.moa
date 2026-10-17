@@ -1,8 +1,0 @@
-// Modular Asset: Euler Identity & Complex Exponentiation
-tex formula text="e^{i\pi} + 1 = 0" at (0, 0) size=1.5 color=#F9C74F;
-tex general text="e^{i\theta} = \cos(\theta) + i\sin(\theta)" at (0, 0) size=1.3 color=#58C4DD;
-
-play write(formula) 1.5s smooth;
-wait 0.5s;
-play transform(formula, general) 1.5s smooth;
-wait 0.5s;

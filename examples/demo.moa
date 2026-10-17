@@ -1,8 +1,0 @@
-// MathOxide demo scene — circle drawn, square fades in, circle morphs into it.
-circle c at (0,0) r=2 fill=#58C4DD33, stroke=blue, sw=6;
-rect s at (3,0) w=3, h=3 fill=#FC625533, stroke=red, sw=4;
-play showCreation(c) 2s smooth;
-wait 0.5s;
-play fadeIn(s) 1s smooth;
-play transform(c, s) 1.5s smooth;
-wait 0.5s;

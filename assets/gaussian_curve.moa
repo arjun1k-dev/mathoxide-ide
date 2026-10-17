@@ -1,9 +1,0 @@
-// Modular Asset: Gaussian Normal Distribution
-axes ax at (0, -0.5) x=(-4, 4, 1) y=(0, 1.2, 0.5) w=8 h=3 stroke=#445577 sw=2;
-func bell on=ax expr="exp(-x*x)" from=-4 to=4 stroke=#FC6255 sw=3.5;
-tex label at (0, 1.8) text="\frac{1}{\sqrt{2\pi}} e^{-x^2/2}" size=0.9 color=#FC6255;
-
-play showCreation(ax) 1.0s smooth;
-play write(label) 1.0s smooth;
-play showCreation(bell) 1.8s smooth;
-wait 0.5s;

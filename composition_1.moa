@@ -1,0 +1,6 @@
+// MathOxide Master Composition
+// Import and sequence modular assets across the timeline
+import "assets/euler_formula.moa" as euler at (0, 1.5);
+import "assets/sine_wave.moa" as sine at (0, -1.5);
+
+wait 1s;
