@@ -788,7 +788,14 @@ fn build_object(
             let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#58C4DD"));
             let sw = get_f(params, "sw").unwrap_or(1.5);
             let expr = mo_core::expr::Expr::parse(&expr_str)?;
-            let mut g = mo_core::geom::surface_3d(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw);
+            let filled = params.iter().any(|(k, v)| {
+                k == "fill" && matches!(v, Val::Ident(s) if s == "true")
+            });
+            let mut g = if filled {
+                mo_core::geom::surface_3d_filled(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw)
+            } else {
+                mo_core::geom::surface_3d(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw)
+            };
             g.shift(at);
             g
         }

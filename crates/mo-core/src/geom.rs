@@ -307,6 +307,87 @@ where
     g
 }
 
+/// 3D Parametric Surface with filled shading: each grid cell is a flat quad
+/// colored by a Viridis height ramp; the wireframe is height-tinted too.
+/// Keeps geometry procedural and buffers lean (iGPU-friendly flat shading).
+pub fn surface_3d_filled<F>(
+    f: F,
+    x_range: (f32, f32),
+    y_range: (f32, f32),
+    resolution: (usize, usize),
+    stroke: [f32; 4],
+    stroke_width: f32,
+) -> VGroup
+where
+    F: Fn(f32, f32) -> f32,
+{
+    let (nx, ny) = (resolution.0.max(2), resolution.1.max(2));
+    let dx = (x_range.1 - x_range.0) / (nx - 1) as f32;
+    let dy = (y_range.1 - y_range.0) / (ny - 1) as f32;
+
+    // Sample grid once
+    let mut z = vec![0.0f32; nx * ny];
+    let (mut z_min, mut z_max) = (f32::INFINITY, f32::NEG_INFINITY);
+    for j in 0..ny {
+        for i in 0..nx {
+            let v = f(x_range.0 + i as f32 * dx, y_range.0 + j as f32 * dy);
+            z[j * nx + i] = v;
+            z_min = z_min.min(v);
+            z_max = z_max.max(v);
+        }
+    }
+    let z_span = (z_max - z_min).max(1e-6);
+    let ramp = |v: f32| crate::color::viridis((v - z_min) / z_span);
+
+    let at = |i: usize, j: usize| Vec3::new(x_range.0 + i as f32 * dx, y_range.0 + j as f32 * dy, z[j * nx + i]);
+
+    let mut g = VGroup::new();
+
+    // Filled cells (flat per-cell shading), drawn first beneath the wireframe
+    for j in 0..ny - 1 {
+        for i in 0..nx - 1 {
+            let c00 = at(i, j);
+            let c10 = at(i + 1, j);
+            let c11 = at(i + 1, j + 1);
+            let c01 = at(i, j + 1);
+            let mean_z = 0.25 * (c00[2] + c10[2] + c11[2] + c01[2]);
+            let mut fill_c = ramp(mean_z);
+            fill_c[3] = 0.92; // mostly opaque so back faces don't bleed through
+            let mut cell = VGroup::new();
+            cell.start_subpath(c00);
+            cell.add_curve(0.5 * (c00 + c10), c10);
+            cell.add_curve(0.5 * (c10 + c11), c11);
+            cell.add_curve(0.5 * (c11 + c01), c01);
+            cell.add_curve(0.5 * (c01 + c00), c00);
+            cell.close();
+            cell.set_fill(fill_c);
+            cell.set_stroke(fill_c, 0.0);
+            g.append(cell);
+        }
+    }
+
+    // Height-tinted wireframe on top (darkened so the ramp reads through)
+    let wire = |a: Vec3, b: Vec3, g: &mut VGroup| {
+        let mut c = ramp(0.5 * (a[2] + b[2]));
+        for ch in c.iter_mut().take(3) {
+            *ch *= 0.45;
+        }
+        g.append(line(a, b, c, stroke_width));
+    };
+    for j in 0..ny {
+        for i in 0..nx - 1 {
+            wire(at(i, j), at(i + 1, j), &mut g);
+        }
+    }
+    for i in 0..nx {
+        for j in 0..ny - 1 {
+            wire(at(i, j), at(i, j + 1), &mut g);
+        }
+    }
+    let _ = stroke;
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -57,3 +57,44 @@ mod tests {
         assert_eq!(parse("nope"), None);
     }
 }
+
+/// Viridis-style perceptual height ramp (5-stop linear interpolation).
+/// t in [0, 1]: deep purple -> blue -> teal -> green -> yellow.
+pub fn viridis(t: f32) -> [f32; 4] {
+    const STOPS: [[u8; 3]; 5] = [
+        [68, 1, 84],
+        [59, 82, 139],
+        [33, 145, 140],
+        [94, 201, 98],
+        [253, 231, 37],
+    ];
+    let t = t.clamp(0.0, 1.0) * (STOPS.len() - 1) as f32;
+    let i = (t as usize).min(STOPS.len() - 2);
+    let f = t - i as f32;
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f) / 255.0;
+    [
+        lerp(STOPS[i][0], STOPS[i + 1][0]),
+        lerp(STOPS[i][1], STOPS[i + 1][1]),
+        lerp(STOPS[i][2], STOPS[i + 1][2]),
+        1.0,
+    ]
+}
+
+#[cfg(test)]
+mod viridis_tests {
+    use super::viridis;
+
+    #[test]
+    fn ramp_endpoints_and_monotonic_g() {
+        let lo = viridis(0.0);
+        let hi = viridis(1.0);
+        assert!(lo[2] > 0.3 && lo[0] < 0.35); // purple-ish
+        assert!(hi[0] > 0.9 && hi[1] > 0.85 && hi[2] < 0.2); // yellow-ish
+        let mut prev = viridis(0.0)[1];
+        for k in 1..=10 {
+            let g = viridis(k as f32 / 10.0)[1];
+            assert!(g >= prev - 1e-4, "green channel should be near-monotonic");
+            prev = g;
+        }
+    }
+}

@@ -1,0 +1,11 @@
+// Shaded Surface — filled height-ramped surface3d (fill=true)
+axes3d grid at (0, 0) length=3;
+surface3d wave at (0, 0) expr="sin(x)*cos(y)", x=(-3, 3), y=(-3, 3), res=20, fill=true;
+
+play showCreation(grid) 1.2s smooth;
+play showCreation(wave) 2.5s smooth;
+
+// Sweep into 3D perspective and orbit around the shaded surface
+play camera.orbit(phi=55, theta=30) 2.5s smooth;
+play camera.orbit(phi=55, theta=120) 3.0s linear;
+wait 0.5s;
