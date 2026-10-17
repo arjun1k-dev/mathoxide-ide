@@ -11,7 +11,7 @@
 
 mod parser;
 
-pub use parser::{parse, Diag};
+pub use parser::{parse, parse_with_origins, Diag, PlayOrigin};
 
 /// Convenience: parse + report human-friendly diagnostics.
 pub fn parse_or_report(src: &str) -> Result<mo_core::scene::Timeline, String> {

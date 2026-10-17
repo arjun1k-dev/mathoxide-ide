@@ -26,6 +26,7 @@ pub struct MathOxideApp {
     watcher: Option<FileWatcher>,
 
     timeline: Option<Timeline>,
+    play_origins: Vec<mo_dsl::PlayOrigin>,
     camera: Camera,
     current_time: f32,
     selected_mobject: Option<String>,
@@ -90,7 +91,7 @@ impl MathOxideApp {
         };
 
         let mut editor_panel = EditorPanel::new(code.clone());
-        let (timeline, err) = compile_code(&code);
+        let (timeline, play_origins, err) = compile_code(&code);
         editor_panel.set_error(err);
 
         Ok(Self {
@@ -103,6 +104,7 @@ impl MathOxideApp {
             file_path: actual_path,
             watcher,
             timeline,
+            play_origins,
             camera,
             current_time: 0.0,
             selected_mobject: None,
@@ -130,7 +132,8 @@ impl MathOxideApp {
             self.file_path = Some(path.clone());
             self.editor_panel.code = content.clone();
             self.editor_panel.is_dirty = false;
-            let (tl, err) = compile_code(&content);
+            let (tl, origins, err) = compile_code(&content);
+                self.play_origins = origins;
             self.timeline = tl;
             self.editor_panel.set_error(err);
             self.overrides.clear();
@@ -229,7 +232,8 @@ impl MathOxideApp {
             if let Ok(content) = std::fs::read_to_string(path) {
                 self.editor_panel.code = content.clone();
                 self.editor_panel.is_dirty = false;
-                let (tl, err) = compile_code(&content);
+                let (tl, origins, err) = compile_code(&content);
+                self.play_origins = origins;
                 self.timeline = tl;
                 self.editor_panel.set_error(err);
                 self.set_status(format!("Reloaded {}", path.display()));
@@ -491,6 +495,7 @@ impl eframe::App for MathOxideApp {
                     let tl_action = panel.show(
                         ui,
                         self.timeline.as_mut(),
+                        &self.play_origins,
                         &mut self.current_time,
                     );
                     self.timeline_panel = panel;
@@ -499,19 +504,45 @@ impl eframe::App for MathOxideApp {
                             self.editor_panel.is_dirty = true;
                         }
                         Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
-                            match crate::timeline::apply_timings_to_dsl(&self.editor_panel.code, &run_times) {
-                                Some(new_code) => {
-                                    self.editor_panel.code = new_code;
-                                    let (tl, err) = compile_code(&self.editor_panel.code);
-                                    if let Some(t) = tl {
-                                        self.timeline = Some(t);
+                            match mo_dsl::parse_with_origins(&self.editor_panel.code) {
+                                Ok((_, origins))
+                                    if origins.len() == run_times.len() =>
+                                {
+                                    match crate::timeline::apply_timings_multi(
+                                        &self.editor_panel.code,
+                                        &origins,
+                                        &run_times,
+                                    ) {
+                                        Some((new_code, asset_writes)) => {
+                                            let mut written = 0;
+                                            for (path, content) in &asset_writes {
+                                                if std::fs::write(path, content).is_ok() {
+                                                    written += 1;
+                                                }
+                                            }
+                                            self.editor_panel.code = new_code;
+                                            let (tl, origins, err) = compile_code(&self.editor_panel.code);
+                self.play_origins = origins;
+                                            if let Some(t) = tl {
+                                                self.timeline = Some(t);
+                                            }
+                                            self.editor_panel.set_error(err);
+                                            self.editor_panel.is_dirty = true;
+                                            if written > 0 {
+                                                self.set_status(format!(
+                                                    "Timings applied: master + {written} asset file(s) updated"
+                                                ));
+                                            } else {
+                                                self.set_status("Timeline timings written to code");
+                                            }
+                                        }
+                                        None => {
+                                            self.set_status("Apply failed: could not read/rewrite an imported asset file");
+                                        }
                                     }
-                                    self.editor_panel.set_error(err);
-                                    self.editor_panel.is_dirty = true;
-                                    self.set_status("Timeline timings written to code");
                                 }
-                                None => {
-                                    self.set_status("Cannot apply: scene contains imports — edit durations in the asset files");
+                                _ => {
+                                    self.set_status("Cannot apply: run times and plays out of sync — recompile first");
                                 }
                             }
                         }
@@ -547,7 +578,8 @@ impl eframe::App for MathOxideApp {
                                 self.save_current_file();
                             }
                             if code_changed && self.editor_panel.auto_compile {
-                                let (tl, err) = compile_code(&self.editor_panel.code);
+                                let (tl, origins, err) = compile_code(&self.editor_panel.code);
+                self.play_origins = origins;
                                 if let Some(t) = tl {
                                     self.timeline = Some(t);
                                 }
@@ -563,7 +595,8 @@ impl eframe::App for MathOxideApp {
                                 AssetAction::InsertImport { path, alias } => {
                                     let stmt = format!("import \"{path}\" as {alias} at (0, 0);\n");
                                     self.editor_panel.code.push_str(&stmt);
-                                    let (tl, err) = compile_code(&self.editor_panel.code);
+                                    let (tl, origins, err) = compile_code(&self.editor_panel.code);
+                self.play_origins = origins;
                                     if let Some(t) = tl {
                                         self.timeline = Some(t);
                                     }
@@ -627,7 +660,8 @@ impl eframe::App for MathOxideApp {
                         if let Some(updated_code) = apply_shift_to_dsl(&self.editor_panel.code, &id, dx, dy) {
                             self.editor_panel.code = updated_code;
                             self.overrides.remove(&id);
-                            let (tl, err) = compile_code(&self.editor_panel.code);
+                            let (tl, origins, err) = compile_code(&self.editor_panel.code);
+                self.play_origins = origins;
                             if let Some(t) = tl {
                                 self.timeline = Some(t);
                             }
@@ -711,10 +745,10 @@ fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<S
     }
 }
 
-fn compile_code(code: &str) -> (Option<Timeline>, Option<String>) {
-    match mo_dsl::parse_or_report(code) {
-        Ok(tl) => (Some(tl), None),
-        Err(e) => (None, Some(e)),
+fn compile_code(code: &str) -> (Option<Timeline>, Vec<mo_dsl::PlayOrigin>, Option<String>) {
+    match mo_dsl::parse_with_origins(code) {
+        Ok((tl, origins)) => (Some(tl), origins, None),
+        Err(e) => (None, Vec::new(), Some(e.iter().map(|d| format!("{}:{}: {}", d.line, d.col, d.message)).collect::<Vec<_>>().join("\n"))),
     }
 }
 

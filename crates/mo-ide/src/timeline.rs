@@ -70,6 +70,7 @@ impl TimelinePanel {
         &mut self,
         ui: &mut eframe::egui::Ui,
         timeline: Option<&mut Timeline>,
+        origins: &[mo_dsl::PlayOrigin],
         current_time: &mut f32,
     ) -> Option<TimelineAction> {
         let mut action = None;
@@ -170,7 +171,7 @@ impl TimelinePanel {
 
         // Visual animation tracks (sequencer view)
         let track_height = 22.0;
-        let track_infos = collect_tracks(tl);
+        let track_infos = collect_tracks(tl, origins);
         if track_infos.is_empty() {
             return None;
         }
@@ -189,7 +190,7 @@ impl TimelinePanel {
         painter.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, Color32::from_rgb(45, 50, 65)), egui::StrokeKind::Inside);
 
         // Lay out blocks in the (possibly drag-mutated) timeline.
-        let blocks = layout_blocks(tl, rect, track_height);
+        let blocks = layout_blocks(tl, origins, rect, track_height);
         let px_to_sec = |px: f32| ((px - rect.left()) / rect.width().max(1.0)) * total_duration;
 
         let pointer = response.interact_pointer_pos();
@@ -306,7 +307,7 @@ impl TimelinePanel {
         }
 
         // Draw each animation block (recomputed after any drag mutation).
-        let blocks = layout_blocks(tl, rect, track_height);
+        let blocks = layout_blocks(tl, origins, rect, track_height);
         for b in blocks.iter().take(num_tracks) {
             let is_active = *current_time >= b.start && *current_time <= b.start + b.run;
             let final_bg = if is_active {
@@ -371,14 +372,28 @@ struct TrackInfo {
     stroke: Color32,
 }
 
+/// Asset file stem for a play origin, e.g. `euler` for `assets/euler_formula.moa`.
+fn origin_tag(o: &mo_dsl::PlayOrigin) -> Option<String> {
+    o.file
+        .as_ref()
+        .and_then(|f| f.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+}
+
 /// Collect animation blocks with absolute start times and statement indices.
-fn collect_tracks(tl: &Timeline) -> Vec<TrackInfo> {
+fn collect_tracks(tl: &Timeline, origins: &[mo_dsl::PlayOrigin]) -> Vec<TrackInfo> {
     let mut list = Vec::new();
     let mut t = 0.0;
+    let mut play_n = 0usize;
     for (idx, s) in tl.stmts.iter().enumerate() {
         match s {
             Stmt::Play(a) => {
-                let (label, fill, stroke) = anim_style(a);
+                let (mut label, fill, stroke) = anim_style(a);
+                // Prefix imported plays with their asset name: `euler: write(...)`
+                if let Some(tag) = origins.get(play_n).and_then(origin_tag) {
+                    label = format!("{tag}: {label}");
+                }
+                play_n += 1;
                 list.push(TrackInfo {
                     start: t,
                     run: a.run_time,
@@ -397,9 +412,9 @@ fn collect_tracks(tl: &Timeline) -> Vec<TrackInfo> {
 }
 
 /// Convert track infos into laid-out blocks within the painter rect.
-fn layout_blocks(tl: &Timeline, rect: Rect, track_height: f32) -> Vec<Block> {
+fn layout_blocks(tl: &Timeline, origins: &[mo_dsl::PlayOrigin], rect: Rect, track_height: f32) -> Vec<Block> {
     let total = tl.duration().max(0.001);
-    collect_tracks(tl)
+    collect_tracks(tl, origins)
         .into_iter()
         .enumerate()
         .map(|(i, t)| {
@@ -488,16 +503,9 @@ fn anim_style(a: &TimedAnim) -> (String, Color32, Color32) {
     (label, fill, stroke)
 }
 
-/// Rewrite the `Ns` durations of top-level `play` statements in .moa source.
-/// Returns None if the mapping is ambiguous (imports contribute animations).
-pub fn apply_timings_to_dsl(code: &str, run_times: &[f32]) -> Option<String> {
-    if code
-        .lines()
-        .any(|l| l.trim().starts_with("import "))
-    {
-        return None; // imported assets contribute plays; positional rewrite unsafe
-    }
-
+/// Rewrite the `Ns` durations of `play` statements in .moa source, in play
+/// order. Used for the master's own plays and for each imported asset file.
+fn rewrite_play_durations(code: &str, run_times: &[f32]) -> Option<String> {
     let mut next = 0usize;
     let mut modified = false;
     let mut lines: Vec<String> = code.lines().map(|s| s.to_string()).collect();
@@ -557,29 +565,112 @@ pub fn apply_timings_to_dsl(code: &str, run_times: &[f32]) -> Option<String> {
     }
 }
 
+/// Rewrite run times across the master source AND imported asset files, using
+/// the per-play provenance recorded by the importer. Master plays are rewritten
+/// positionally in the master's own `play` lines; each imported asset's plays
+/// are rewritten positionally inside that asset file. Returns the new master
+/// code plus (path, new content) pairs to write back to disk.
+pub fn apply_timings_multi(
+    master_code: &str,
+    origins: &[mo_dsl::PlayOrigin],
+    run_times: &[f32],
+) -> Option<(String, Vec<(std::path::PathBuf, String)>)> {
+    if origins.len() != run_times.len() {
+        return None; // stale origins — caller recompiled out of sync
+    }
+
+    // Master's own plays, in flat (= document) order.
+    let master_runs: Vec<f32> = origins
+        .iter()
+        .zip(run_times)
+        .filter_map(|(o, r)| o.file.is_none().then_some(*r))
+        .collect();
+
+    // Group imported plays by file, ordered by their local play index.
+    let mut per_file: std::collections::BTreeMap<std::path::PathBuf, Vec<(usize, f32)>> =
+        Default::default();
+    for (o, r) in origins.iter().zip(run_times) {
+        if let Some(f) = &o.file {
+            per_file.entry(f.clone()).or_default().push((o.local_play_idx, *r));
+        }
+    }
+
+    let new_master = rewrite_play_durations(master_code, &master_runs);
+
+    let mut asset_writes = Vec::new();
+    for (path, mut runs) in per_file {
+        runs.sort_by_key(|(idx, _)| *idx);
+        let durations: Vec<f32> = runs.into_iter().map(|(_, r)| r).collect();
+        let content = std::fs::read_to_string(&path).ok()?;
+        if let Some(new_content) = rewrite_play_durations(&content, &durations) {
+            asset_writes.push((path, new_content));
+        }
+    }
+
+    Some((
+        new_master.unwrap_or_else(|| master_code.to_string()),
+        asset_writes,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::apply_timings_to_dsl;
+    use super::apply_timings_multi;
 
     #[test]
     fn rewrites_play_durations_in_order() {
         let code = "circle c at (0, 0) r=2;\nplay showCreation(c) 2s smooth;\nwait 0.5s;\nplay fadeIn(c) 1s;\n";
-        let out = apply_timings_to_dsl(code, &[3.5, 0.75]).unwrap();
+        let origins = vec![
+            mo_dsl::PlayOrigin { file: None, local_play_idx: 0 },
+            mo_dsl::PlayOrigin { file: None, local_play_idx: 0 },
+        ];
+        let (out, assets) = apply_timings_multi(code, &origins, &[3.5, 0.75]).unwrap();
+        assert!(assets.is_empty());
         assert!(out.contains("play showCreation(c) 3.5s smooth;"));
         assert!(out.contains("play fadeIn(c) 0.75s;"));
         assert!(out.contains("wait 0.5s;")); // waits untouched
     }
 
     #[test]
-    fn refuses_scenes_with_imports() {
-        let code = "import \"assets/x.moa\" as x;\nplay showCreation(c) 2s;\n";
-        assert!(apply_timings_to_dsl(code, &[1.0]).is_none());
+    fn applies_across_imported_asset_files() {
+        let asset_file = std::env::temp_dir().join("test_apply_asset.moa");
+        std::fs::write(&asset_file, "circle s r=1;\nplay showCreation(s) 1s;\nplay fadeIn(s) 1s;\n")
+            .expect("write temp asset");
+
+        let master = format!(
+            "import \"{}\" as a;\ncircle m r=1;\nplay showCreation(m) 2s;\n",
+            asset_file.to_str().unwrap()
+        );
+        let (tl, origins) = mo_dsl::parse_with_origins(&master).expect("parses master");
+        // flat plays: asset's 2 plays, then master's 1
+        let run_times: Vec<f32> = tl
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                mo_core::scene::Stmt::Play(a) => Some(a.run_time),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(run_times.len(), 3);
+
+        let trimmed: Vec<f32> = vec![run_times[0], 0.4, run_times[2]];
+        let (new_master, assets) = apply_timings_multi(&master, &origins, &trimmed).unwrap();
+
+        // asset file's second play rewritten to 0.4s; master untouched
+        assert!(assets.len() == 1 && assets[0].0 == asset_file);
+        let asset_out = &assets[0].1;
+        assert!(asset_out.contains("play fadeIn(s) 0.4s;"));
+        assert!(asset_out.contains("play showCreation(s) 1s;"));
+        assert!(new_master.contains("play showCreation(m) 2s;"));
+
+        let _ = std::fs::remove_file(asset_file);
     }
 
     #[test]
     fn round_trips_through_parser() {
         let code = "circle c at (0,0) r=2;\nplay showCreation(c) 2s smooth;\n";
-        let out = apply_timings_to_dsl(code, &[1.25]).unwrap();
+        let origins = vec![mo_dsl::PlayOrigin { file: None, local_play_idx: 0 }];
+        let (out, _) = apply_timings_multi(code, &origins, &[1.25]).unwrap();
         let tl = mo_dsl::parse_or_report(&out).expect("recompiled");
         assert!((tl.duration() - 1.25).abs() < 1e-3);
     }
