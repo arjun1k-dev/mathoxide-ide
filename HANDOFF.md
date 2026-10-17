@@ -12,14 +12,31 @@
   mo-moab:         2 passed
   mo-render:       2 passed
   ```
-* **Git Checkpoint State**: Clean working tree. Commits on `main`:
+* **Git Checkpoint State**: Clean working tree. Latest commits on `main`:
   - `9c61767`: `feat: modular asset architecture, 16:9 letterbox viewport, 3D orbit and native file dialogs`
   - `7e46e17`: `feat: complete Model Context Protocol (MCP) server for MathOxide agent integration`
-  - `ae5bbdd`: `docs: update HANDOFF.md with asset architecture, 16:9 viewport, 3D orbit, and MCP server`
+  - `005ea61`: `docs: finalize comprehensive HANDOFF.md for future sessions`
 
 ---
 
-## 2. Workspace Crates & Architecture
+## 2. Evolution & Decisions: What Changed from Initial Handoff to Now
+
+This section outlines every user request, architectural decision, and code transformation that took place between the initial handoff and the current state:
+
+| Area | Initial Handoff State | User Feedback / Request | Decision & Solution Implemented |
+|---|---|---|---|
+| **Viewport Display** | GPU texture stretched dynamically across the center panel. Circles appeared as squished tall ovals on 14-inch laptops. | *"First thing, the renderer is squished... give it a permanent 14 inch width so it isn't a screen size or window width issue."* | **16:9 Letterboxed Canvas**: Decided to enforce a fixed 16:9 aspect ratio centered within the viewport panel with dark letterbox backing and synced `camera.width` / `camera.height`. Viewport is now 1:1 pixel-accurate to 1080p MP4 exports. |
+| **Project Architecture** | Monolithic scripts containing entire scene definitions from scratch. | *"We almost have an interface like a video editor... what I want is a file for each asset... code in each file is an individual asset and not an entire video template... main file imports all other assets and puts them into scene."* | **Modular Asset Paradigm**: Built `assets/*.moa` for component clips and `examples/master_video.moa` for compositions. Added `import "path" [as alias] [at (x, y)];` syntax in `mo-dsl`. Pre-resolves geometries, offsets coordinates, and prevents human/AI context overload. |
+| **Math & NumPy Equivalent** | Hardcoded math approximations for sine curves; no general vector math engine. | *"Is it real math?? Manim uses numpy which is literally compiled C... here is a list of useful libraries (ndarray, nalgebra, rustfft, statrs)... apply it so software doesn't hardcode."* | **Real Vectorized Math in Core**: Integrated `ndarray`, `nalgebra`, `rustfft`, `statrs`, `simba` into `mo-core::math`. Replaced ad-hoc point loops with vectorized `linspace`, parametric 2D/3D evaluation, and exact matrix transformations. |
+| **Typography & LaTeX** | Raw basic SVG text and placeholder math. | *"Let's refine rendering... we need latex rendering, object transformation, and other stuff that makes manim cool."* | **Typst-Powered LaTeX Math**: Integrated Typst compiler into `mo-core::svg`, translating standard LaTeX formulas into high-precision quadratic Bézier curves with exact mathematical kerning without external LaTeX installations. |
+| **Font Boldness Bug** | Text and formulas spawned as heavy, bold vector shapes and snapped to slim weights when animations completed. | *"When text or math appears, it initially starts as very bold font, and once fully into scene it turns to normal. Look what's causing this and fix it!"* | **Zero Synthetic Stroke**: Identified that `ShowCreation` applied an artificial stroke ($sw = 2.0$) on font curves during transitions. TrueType outlines are designed for fill only. Replaced with sequential subpath reveal (`extract_subpaths()`) with $sw = 0$. Fonts are razor-sharp from frame 0. |
+| **File System Interaction** | IDE only edited a hardcoded buffer; couldn't open or save files on the laptop. | *"Currently, the IDE can't interact with files on my laptop. So add that feature or fix it if already exists."* | **Native OS File Dialogs (`rfd`)**: Added cross-platform system file dialogs for Open File (`Ctrl+O`), Open Project Folder, Save (`Ctrl+S`), Save As (`Ctrl+Shift+S`), and Export MP4 / MOAB. Added dedicated `📁 Assets` browser tab in IDE left panel. |
+| **3D Rendering** | Purely 2D top-down camera with no elevation tilt, azimuth, or 3D primitives. | *"We also need to add 3D, just tell me if current resources are enough or you need more."* | **Full 3D Orbit & Primitives**: Existing WGPU shaders and `glam` were 100% sufficient without adding heavy game engines. Added polar tilt ($\phi$), azimuth ($\theta$), and roll ($\gamma$) to `Camera`. Added `axes3d`, `cube`, `sphere`, `surface3d` ($z = f(x, y)$), and right-click viewport 3D orbit controls. |
+| **Agent / MCP Tooling** | `crates/mo-mcp` was an empty stub with `main()` printing "coming in Phase 5". | *"This will allow our later MCP integration plan to be successful, as it won't be scanning entire codebase..."* | **Full Model Context Protocol Server**: Implemented standard JSON-RPC 2.0 stdio server in `crates/mo-mcp` with tools for listing assets, reading source, writing assets, syntax validation, and headless frame rendering. |
+
+---
+
+## 3. Workspace Crates & Architecture
 
 ```
 mathoxide/
@@ -50,7 +67,7 @@ mathoxide/
 
 ---
 
-## 3. Major Features & Mechanisms Ported
+## 4. Key Mechanisms Implemented
 
 ### A. Modular Asset-Wise Architecture (`assets/*.moa`)
 * **Isolated Component Files**: Every equation, function plot, or geometry is written as an isolated clip file (`assets/*.moa`). Assets are evaluated independently with their own local coordinate space.
@@ -68,8 +85,12 @@ mathoxide/
   The compiler (`mo-dsl`) prefixes all identifiers with `<alias>_`, offsets object geometries and transform targets by `at (x, y)`, and concatenates the animation timeline.
 
 ### B. Viewport 16:9 Letterbox (Zero Squishing)
-* **Root Cause of Prior Squishing**: Arbitrary panel sizing in egui caused the WGPU texture to be stretched to non-16:9 aspect ratios while camera matrices remained fixed, compressing circles into vertical ellipses on 14-inch laptops.
-* **The Fix**: Viewport computes an exact 16:9 fitted rectangle centered in the panel area, synchronizes `camera.width = canvas_w` and `camera.height = canvas_h`, and renders with a sleek 1px frame border and dark letterbox backdrop. 100% WYSIWYG parity with 1080p MP4 exports.
+* **The Math**:
+  $$\text{aspect} = 16.0 / 9.0$$
+  $$\text{canvas\_w} = \begin{cases} \text{avail\_h} \times \text{aspect} & \text{if } \text{avail\_w} / \text{avail\_h} > \text{aspect} \\ \text{avail\_w} & \text{otherwise} \end{cases}$$
+  $$\text{canvas\_h} = \text{canvas\_w} / \text{aspect}$$
+* The canvas is centered in the viewport with a 1px frame border.
+* `camera.width = canvas_w` and `camera.height = canvas_h` are continuously maintained, ensuring hit-testing and WGPU projections match with 0% distortion.
 
 ### C. 3D Camera Orbit & 3D Primitives
 * **Camera Model**: Added polar tilt ($\phi$), azimuth ($\theta$), and roll ($\gamma$) angles with standard 3D rotation in `Camera::uniforms()`:
@@ -99,13 +120,9 @@ mathoxide/
   - `render_frame`: Headless offscreen GPU render of any scene at timestamp $t$ to PNG.
   - `assemble_scene`: Automatically sequences multiple assets into a master `.moa` file.
 
-### F. Typography & Font Weight Bug Fix
-* Vector text transitions (`ShowCreation` / `Write`) previously stroked glyph outlines with $sw = 2.0$, causing text to look heavily bold before snapping to normal weight.
-* Outlines now render strictly with vector fill ($sw = 0$) using sequential glyph reveal (`extract_subpaths()`). Typography is crisp from frame 0.
-
 ---
 
-## 4. How to Run & Test
+## 5. How to Run & Test
 
 ### Run the Interactive Studio (IDE):
 ```bash
@@ -139,7 +156,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
 
 ---
 
-## 5. Key Engineering Gotchas & Hard-Won Lessons
+## 6. Key Engineering Gotchas & Hard-Won Lessons
 
 1. **WGPU 24 API Conventions**:
    - `Instance::new(&desc)` and `request_adapter` return Results.
@@ -156,9 +173,49 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
 
 ---
 
-## 6. Instructions for Future Agents & Developers
+## 7. Direction & Roadmap: Where We Are Going & What to Carry On With
+
+### The Grand Vision
+MathOxide is evolving into an autonomous mathematical creative suite. A developer or agent describes a visual proof, numerical concept, or video structure, and MathOxide:
+1. Generates modular assets in `assets/`.
+2. Assembles them into compositions in `examples/`.
+3. Validates and live-previews them in the interactive IDE.
+4. Exports broadcast-quality 4K/60fps MP4s in fractions of real-time.
+
+### Priority Queue for the Next Agent
+
+If you are the incoming agent picking up the codebase, here is your concrete, prioritized roadmap:
+
+#### Task 1: Interactive Timeline Track Drag & Trim (`crates/mo-ide/src/timeline.rs`)
+* **Current State**: The timeline scrubber displays animation blocks on sequencer tracks as read-only colored rounded rectangles.
+* **Next Step**: Make animation blocks interactive:
+  - Left-click + horizontal drag on an animation block shifts its start time in the sequence.
+  - Dragging the left or right edge trims its `run_time`.
+  - Add an "Apply Timeline Timings to Code" action (similar to the inspector's "Apply Shift to Code") that updates `1.5s` values in the `.moa` code.
+
+#### Task 2: Camera Animation Keyframing in DSL (`crates/mo-dsl`, `crates/mo-core`)
+* **Current State**: Camera 3D orbit can be manipulated via interactive mouse drag or CLI flags (`--phi`, `--theta`).
+* **Next Step**: Add dynamic camera movements into the animation timeline in DSL:
+  ```moa
+  play camera.orbit(phi=60, theta=45) 2.0s smooth;
+  play camera.zoom(1.5) 1.0s smooth;
+  play camera.move_to((2, 0)) 1.5s smooth;
+  ```
+  Add `TimedAnim::CameraOrbit`, `TimedAnim::CameraZoom`, and update `Player::state_at` or camera state interpolation at time $t$.
+
+#### Task 3: 3D Surface Shading & Lighting Depth
+* **Current State**: 3D surfaces (`surface3d`) render as wireframe contour curves.
+* **Next Step**: Add filled triangle mesh tessellation with directional lighting or height-based color ramps (e.g. Viridis / Plasma gradients based on $z$ height), utilizing the WGPU shaders in `shaders/fill.wgsl`.
+
+#### Task 4: Packaging the MCP Server into Antigravity / Claude Agent Config
+* **Current State**: `crates/mo-mcp` is a fully functional JSON-RPC server with 6 core tools compiled at `target/debug/mathoxide-mcp`.
+* **Next Step**: Create a configuration entry or MCP JSON manifest so that any agent running on the user's machine can immediately call MathOxide tools directly from chat.
+
+---
+
+## 8. Instructions for Future Agents & Developers
 
 * **Preserve Documentation & Comments**: Always maintain existing comments and docstrings.
 * **Keep Asset Isolation**: When creating new mathematical animations, always write the individual component in `assets/<name>.moa` first, test it in isolation, and then import it into a composition.
 * **Version Control**: Keep committing clean, self-contained milestones to git (`main` branch) to prevent regressions.
-* **Project Memory & Preferences**: User is Arjun. Direct, mechanism-first, no fluff.
+* **User Preferences (Arjun)**: Direct, mechanism-first, no fluff. Keep the engine native pure Rust, GPU-first, and lightning fast.
