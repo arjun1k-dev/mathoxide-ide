@@ -724,8 +724,17 @@ impl Renderer {
     /// Render a HashMap state to the offscreen target, return RGBA pixels.
     pub fn render(&self, state: &std::collections::HashMap<String, VGroup>) -> image::RgbaImage {
         let cam = self.default_camera();
+        self.render_with_camera(state, &cam)
+    }
+
+    /// Render a HashMap state using an explicit Camera (for 3D tilt/azimuth orbit and zoom).
+    pub fn render_with_camera(
+        &self,
+        state: &std::collections::HashMap<String, VGroup>,
+        camera: &mo_core::camera::Camera,
+    ) -> image::RgbaImage {
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        self.draw_scene_pass(state, &cam, &mut encoder);
+        self.draw_scene_pass(state, camera, &mut encoder);
         self.queue.submit(Some(encoder.finish()));
         let bytes = self.read_target();
         image::RgbaImage::from_raw(self.width, self.height, bytes).expect("size mismatch")

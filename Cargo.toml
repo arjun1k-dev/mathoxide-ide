@@ -44,6 +44,7 @@ rustfft = "6.4"
 statrs = "0.19"
 svgtypes = "0.16"
 roxmltree = "0.21"
+rfd = "0.15"
 
 mo-core = { path = "crates/mo-core" }
 mo-render = { path = "crates/mo-render" }

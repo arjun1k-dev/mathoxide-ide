@@ -1,6 +1,7 @@
+use crate::assets::{AssetAction, AssetPanel};
 use crate::editor::EditorPanel;
 use crate::export::{export_moab, export_mp4};
-use crate::inspector::InspectorPanel;
+use crate::inspector::{InspectorAction, InspectorPanel};
 use crate::scene_tree::SceneTreePanel;
 use crate::timeline::TimelinePanel;
 use crate::viewport::ViewportPanel;
@@ -18,6 +19,7 @@ pub struct MathOxideApp {
     renderer: Renderer,
     viewport_panel: ViewportPanel,
     editor_panel: EditorPanel,
+    asset_panel: AssetPanel,
     timeline_panel: TimelinePanel,
 
     file_path: Option<PathBuf>,
@@ -31,11 +33,12 @@ pub struct MathOxideApp {
 
     // View toggles
     show_editor: bool,
+    show_assets: bool,
     show_scene_tree: bool,
     show_inspector: bool,
     show_timeline: bool,
 
-    // Left panel active tab (0: Editor, 1: Scene Tree)
+    // Left panel active tab (0: Editor, 1: Assets, 2: Scene Tree)
     left_tab: usize,
 
     // Timing and FPS
@@ -68,14 +71,22 @@ impl MathOxideApp {
         camera.height = initial_h as f32;
         camera.frame_height = 8.0;
 
-        let path = initial_file.unwrap_or_else(|| PathBuf::from("examples/demo.moa"));
-        let (code, watcher) = if path.exists() {
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let asset_panel = AssetPanel::new(project_dir);
+
+        let path = initial_file.unwrap_or_else(|| PathBuf::from("examples/master_video.moa"));
+        let (code, actual_path, watcher) = if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             let w = FileWatcher::new(&path).ok();
-            (content, w)
+            (content, Some(path), w)
+        } else if PathBuf::from("examples/demo.moa").exists() {
+            let p = PathBuf::from("examples/demo.moa");
+            let content = std::fs::read_to_string(&p).unwrap_or_default();
+            let w = FileWatcher::new(&p).ok();
+            (content, Some(p), w)
         } else {
             let starter = default_starter_code();
-            (starter, None)
+            (starter, None, None)
         };
 
         let mut editor_panel = EditorPanel::new(code.clone());
@@ -87,8 +98,9 @@ impl MathOxideApp {
             renderer,
             viewport_panel,
             editor_panel,
+            asset_panel,
             timeline_panel: TimelinePanel::default(),
-            file_path: Some(path),
+            file_path: actual_path,
             watcher,
             timeline,
             camera,
@@ -96,6 +108,7 @@ impl MathOxideApp {
             selected_mobject: None,
             overrides: HashMap::new(),
             show_editor: true,
+            show_assets: true,
             show_scene_tree: true,
             show_inspector: true,
             show_timeline: true,
@@ -104,7 +117,7 @@ impl MathOxideApp {
             fps: 60.0,
             frame_count: 0,
             fps_timer: Instant::now(),
-            status_message: Some(("MathOxide IDE ready".into(), Instant::now())),
+            status_message: Some(("MathOxide Studio ready — pair programming environment active".into(), Instant::now())),
         })
     }
 
@@ -112,14 +125,102 @@ impl MathOxideApp {
         self.status_message = Some((msg.into(), Instant::now()));
     }
 
+    pub fn open_file(&mut self, path: PathBuf) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            self.file_path = Some(path.clone());
+            self.editor_panel.code = content.clone();
+            self.editor_panel.is_dirty = false;
+            let (tl, err) = compile_code(&content);
+            self.timeline = tl;
+            self.editor_panel.set_error(err);
+            self.overrides.clear();
+            self.current_time = 0.0;
+            self.camera.reset();
+            if let Some(w) = &mut self.watcher {
+                let _ = w.watch_file(&path);
+            } else {
+                self.watcher = FileWatcher::new(&path).ok();
+            }
+            self.set_status(format!("Opened {}", path.display()));
+        } else {
+            self.set_status(format!("Failed to read {}", path.display()));
+        }
+    }
+
+    pub fn open_file_dialog(&mut self) {
+        let initial_dir = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .unwrap_or(&self.asset_panel.project_path);
+
+        if let Some(path) = rfd::FileDialog::new()
+            .set_directory(initial_dir)
+            .add_filter("MathOxide Scene", &["moa", "moab"])
+            .pick_file()
+        {
+            self.open_file(path);
+        }
+    }
+
+    pub fn open_folder_dialog(&mut self) {
+        if let Some(folder) = rfd::FileDialog::new()
+            .set_directory(&self.asset_panel.project_path)
+            .pick_folder()
+        {
+            self.asset_panel.project_path = folder.clone();
+            self.asset_panel.rescan();
+            self.set_status(format!("Active project: {}", folder.display()));
+        }
+    }
+
+    pub fn save_as(&mut self) {
+        let initial_dir = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .unwrap_or(&self.asset_panel.project_path);
+
+        let default_name = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|f| f.to_str())
+            .unwrap_or("scene.moa");
+
+        if let Some(path) = rfd::FileDialog::new()
+            .set_directory(initial_dir)
+            .set_file_name(default_name)
+            .add_filter("MathOxide Animation", &["moa"])
+            .save_file()
+        {
+            if let Err(e) = std::fs::write(&path, &self.editor_panel.code) {
+                self.set_status(format!("Save error: {}", e));
+            } else {
+                self.file_path = Some(path.clone());
+                self.editor_panel.is_dirty = false;
+                if let Some(w) = &mut self.watcher {
+                    let _ = w.watch_file(&path);
+                } else {
+                    self.watcher = FileWatcher::new(&path).ok();
+                }
+                self.asset_panel.rescan();
+                self.set_status(format!("Saved to {}", path.display()));
+            }
+        }
+    }
+
     pub fn save_current_file(&mut self) {
-        if let Some(path) = &self.file_path {
-            if let Err(e) = std::fs::write(path, &self.editor_panel.code) {
+        if let Some(path) = self.file_path.clone() {
+            if let Err(e) = std::fs::write(&path, &self.editor_panel.code) {
                 self.set_status(format!("Error saving: {}", e));
             } else {
                 self.editor_panel.is_dirty = false;
                 self.set_status(format!("Saved {}", path.display()));
+                self.asset_panel.rescan();
             }
+        } else {
+            self.save_as();
         }
     }
 
@@ -133,6 +234,46 @@ impl MathOxideApp {
                 self.editor_panel.set_error(err);
                 self.set_status(format!("Reloaded {}", path.display()));
             }
+        }
+    }
+
+    pub fn new_asset(&mut self) {
+        let assets_dir = self.asset_panel.project_path.join("assets");
+        let _ = std::fs::create_dir_all(&assets_dir);
+        let mut idx = 1;
+        let mut target = assets_dir.join(format!("asset_{idx}.moa"));
+        while target.exists() {
+            idx += 1;
+            target = assets_dir.join(format!("asset_{idx}.moa"));
+        }
+
+        let template = new_asset_template();
+        if let Err(e) = std::fs::write(&target, &template) {
+            self.set_status(format!("Error creating asset: {e}"));
+        } else {
+            self.open_file(target);
+            self.asset_panel.rescan();
+            self.left_tab = 0;
+            self.set_status(format!("Created new asset asset_{idx}.moa"));
+        }
+    }
+
+    pub fn new_master(&mut self) {
+        let mut idx = 1;
+        let mut target = self.asset_panel.project_path.join(format!("composition_{idx}.moa"));
+        while target.exists() {
+            idx += 1;
+            target = self.asset_panel.project_path.join(format!("composition_{idx}.moa"));
+        }
+
+        let template = new_master_template();
+        if let Err(e) = std::fs::write(&target, &template) {
+            self.set_status(format!("Error creating composition: {e}"));
+        } else {
+            self.open_file(target);
+            self.asset_panel.rescan();
+            self.left_tab = 0;
+            self.set_status(format!("Created new composition composition_{idx}.moa"));
         }
     }
 }
@@ -192,13 +333,20 @@ impl eframe::App for MathOxideApp {
                 self.timeline_panel.playing = false;
                 self.current_time = (self.current_time - 1.0 / 60.0).max(0.0);
             }
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::S) {
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S) {
+                self.save_as();
+            } else if i.modifiers.ctrl && i.key_pressed(egui::Key::S) {
                 self.save_current_file();
             }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::O) {
+                self.open_file_dialog();
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::N) {
+                self.new_asset();
+            }
             if i.key_pressed(egui::Key::R) && !i.modifiers.any() {
-                self.camera.center = glam::Vec3::ZERO;
-                self.camera.height = 8.0;
-                self.set_status("Camera reset");
+                self.camera.reset();
+                self.set_status("Camera reset to 2D default");
             }
         });
 
@@ -206,8 +354,30 @@ impl eframe::App for MathOxideApp {
         egui::TopBottomPanel::top("top_menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("New Asset (Ctrl+N)").clicked() {
+                        self.new_asset();
+                        ui.close_menu();
+                    }
+                    if ui.button("New Master Composition...").clicked() {
+                        self.new_master();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Open File... (Ctrl+O)").clicked() {
+                        self.open_file_dialog();
+                        ui.close_menu();
+                    }
+                    if ui.button("Open Project Folder...").clicked() {
+                        self.open_folder_dialog();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Save (Ctrl+S)").clicked() {
                         self.save_current_file();
+                        ui.close_menu();
+                    }
+                    if ui.button("Save As... (Ctrl+Shift+S)").clicked() {
+                        self.save_as();
                         ui.close_menu();
                     }
                     if ui.button("Reload from Disk").clicked() {
@@ -215,23 +385,36 @@ impl eframe::App for MathOxideApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Export .moab Bundle...").clicked() {
-                        let out_path = PathBuf::from("export.moab");
-                        if let Err(e) = export_moab(&self.editor_panel.code, &out_path) {
-                            self.set_status(format!("MOAB Export error: {}", e));
+                    if ui.button("Export MP4 Video...").clicked() {
+                        if let Some(tl) = &self.timeline {
+                            let tl_clone = tl.clone();
+                            if let Some(out_path) = rfd::FileDialog::new()
+                                .add_filter("MP4 Video", &["mp4"])
+                                .set_file_name("render.mp4")
+                                .save_file()
+                            {
+                                let dest_str = out_path.display().to_string();
+                                std::thread::spawn(move || {
+                                    let _ = export_mp4(&tl_clone, &out_path, 1920, 1080, 60, |_, _| {});
+                                });
+                                self.set_status(format!("Started background MP4 export -> {}", dest_str));
+                            }
                         } else {
-                            self.set_status(format!("Exported to {}", out_path.display()));
+                            self.set_status("Cannot export: scene is empty or has compilation errors");
                         }
                         ui.close_menu();
                     }
-                    if ui.button("Export MP4 Video...").clicked() {
-                        if let Some(tl) = &self.timeline {
-                            let out_path = PathBuf::from("export.mp4");
-                            let tl_clone = tl.clone();
-                            std::thread::spawn(move || {
-                                let _ = export_mp4(&tl_clone, &out_path, 1920, 1080, 60, |_, _| {});
-                            });
-                            self.set_status("Started background MP4 export -> export.mp4");
+                    if ui.button("Export .moab Bundle...").clicked() {
+                        if let Some(out_path) = rfd::FileDialog::new()
+                            .add_filter("MOAB Package", &["moab"])
+                            .set_file_name("composition.moab")
+                            .save_file()
+                        {
+                            if let Err(e) = export_moab(&self.editor_panel.code, &out_path) {
+                                self.set_status(format!("MOAB Export error: {}", e));
+                            } else {
+                                self.set_status(format!("Exported to {}", out_path.display()));
+                            }
                         }
                         ui.close_menu();
                     }
@@ -243,62 +426,55 @@ impl eframe::App for MathOxideApp {
 
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_editor, "Code Editor");
+                    ui.checkbox(&mut self.show_assets, "Asset Browser");
                     ui.checkbox(&mut self.show_scene_tree, "Scene Tree");
                     ui.checkbox(&mut self.show_inspector, "Inspector");
                     ui.checkbox(&mut self.show_timeline, "Timeline");
                     ui.separator();
                     if ui.button("Reset Camera (R)").clicked() {
-                        self.camera.center = glam::Vec3::ZERO;
-                        self.camera.frame_height = 8.0;
+                        self.camera.reset();
                         ui.close_menu();
                     }
                 });
 
                 ui.menu_button("Presets", |ui| {
-                    if ui.button("Demo Scene (examples/demo.moa)").clicked() {
-                        let path = PathBuf::from("examples/demo.moa");
-                        if let Ok(c) = std::fs::read_to_string(&path) {
-                            self.file_path = Some(path.clone());
-                            self.editor_panel.code = c.clone();
-                            self.editor_panel.is_dirty = false;
-                            let (tl, err) = compile_code(&c);
-                            self.timeline = tl;
-                            self.editor_panel.set_error(err);
-                            self.overrides.clear();
-                            if let Some(w) = &mut self.watcher {
-                                let _ = w.watch_file(&path);
-                            } else {
-                                self.watcher = FileWatcher::new(&path).ok();
-                            }
-                            self.set_status("Loaded examples/demo.moa");
-                        }
+                    if ui.button("Master Video Composition (examples/master_video.moa)").clicked() {
+                        self.open_file(PathBuf::from("examples/master_video.moa"));
                         ui.close_menu();
                     }
-                    if ui.button("Geometric Shapes Preset").clicked() {
-                        let code = shapes_preset_code();
-                        self.editor_panel.code = code.clone();
-                        self.editor_panel.is_dirty = true;
-                        let (tl, err) = compile_code(&code);
-                        self.timeline = tl;
-                        self.editor_panel.set_error(err);
-                        self.overrides.clear();
-                        self.set_status("Loaded Shapes Preset");
+                    if ui.button("3D Orbit Showcase (examples/demo_3d.moa)").clicked() {
+                        self.open_file(PathBuf::from("examples/demo_3d.moa"));
+                        ui.close_menu();
+                    }
+                    if ui.button("LaTeX Showcase (examples/demo_latex.moa)").clicked() {
+                        self.open_file(PathBuf::from("examples/demo_latex.moa"));
+                        ui.close_menu();
+                    }
+                    if ui.button("Demo Scene (examples/demo.moa)").clicked() {
+                        self.open_file(PathBuf::from("examples/demo.moa"));
                         ui.close_menu();
                     }
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some((msg, created)) = &self.status_message {
-                        if now.duration_since(*created).as_secs_f32() < 4.0 {
+                        if now.duration_since(*created).as_secs_f32() < 4.5 {
                             ui.colored_label(Color32::from_rgb(125, 207, 255), msg);
                         }
                     }
                     ui.separator();
+                    let file_label = self
+                        .file_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("Untitled");
+
                     ui.label(
-                        egui::RichText::new("MathOxide v0.1")
+                        egui::RichText::new(format!("[{file_label}]"))
                             .monospace()
                             .size(11.0)
-                            .color(Color32::from_rgb(100, 110, 130)),
+                            .color(Color32::from_rgb(140, 160, 190)),
                     );
                 });
             });
@@ -319,47 +495,83 @@ impl eframe::App for MathOxideApp {
                 });
         }
 
-        // Left Panel: Tabs for Editor and Scene Tree
-        if self.show_editor || self.show_scene_tree {
+        // Left Panel: Tabs for Editor, Assets, and Scene Tree
+        if self.show_editor || self.show_assets || self.show_scene_tree {
             egui::SidePanel::left("left_side_panel")
                 .resizable(true)
-                .default_width(300.0)
-                .min_width(200.0)
+                .default_width(320.0)
+                .min_width(220.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         if self.show_editor && ui.selectable_label(self.left_tab == 0, "📝 Editor").clicked() {
                             self.left_tab = 0;
                         }
-                        if self.show_scene_tree && ui.selectable_label(self.left_tab == 1, "🌳 Scene Tree").clicked() {
+                        if self.show_assets && ui.selectable_label(self.left_tab == 1, "📁 Assets").clicked() {
                             self.left_tab = 1;
+                        }
+                        if self.show_scene_tree && ui.selectable_label(self.left_tab == 2, "🌳 Scene Tree").clicked() {
+                            self.left_tab = 2;
                         }
                     });
                     ui.separator();
 
-                    if self.left_tab == 0 && self.show_editor {
-                        let (code_changed, save_req) = self.editor_panel.show(ui);
-                        if save_req {
-                            self.save_current_file();
-                        }
-                        if code_changed && self.editor_panel.auto_compile {
-                            let (tl, err) = compile_code(&self.editor_panel.code);
-                            if let Some(t) = tl {
-                                self.timeline = Some(t);
+                    match self.left_tab {
+                        0 if self.show_editor => {
+                            let (code_changed, save_req) = self.editor_panel.show(ui);
+                            if save_req {
+                                self.save_current_file();
                             }
-                            self.editor_panel.set_error(err);
+                            if code_changed && self.editor_panel.auto_compile {
+                                let (tl, err) = compile_code(&self.editor_panel.code);
+                                if let Some(t) = tl {
+                                    self.timeline = Some(t);
+                                }
+                                self.editor_panel.set_error(err);
+                            }
                         }
-                    } else if self.show_scene_tree {
-                        let current_state = if let Some(tl) = &self.timeline {
-                            Player::state_at(tl, self.current_time)
-                        } else {
-                            HashMap::new()
-                        };
-                        SceneTreePanel::show(
-                            ui,
-                            self.timeline.as_ref(),
-                            &current_state,
-                            &mut self.selected_mobject,
-                        );
+                        1 if self.show_assets => {
+                            let action = self.asset_panel.show(ui, self.file_path.as_deref());
+                            match action {
+                                AssetAction::Open(path) => {
+                                    self.open_file(path);
+                                }
+                                AssetAction::InsertImport { path, alias } => {
+                                    let stmt = format!("import \"{path}\" as {alias} at (0, 0);\n");
+                                    self.editor_panel.code.push_str(&stmt);
+                                    let (tl, err) = compile_code(&self.editor_panel.code);
+                                    if let Some(t) = tl {
+                                        self.timeline = Some(t);
+                                    }
+                                    self.editor_panel.set_error(err);
+                                    self.editor_panel.is_dirty = true;
+                                    self.set_status(format!("Imported '{alias}' into scene"));
+                                }
+                                AssetAction::NewAsset => {
+                                    self.new_asset();
+                                }
+                                AssetAction::NewMaster => {
+                                    self.new_master();
+                                }
+                                AssetAction::ChangeProjectDir(folder) => {
+                                    self.set_status(format!("Project directory: {}", folder.display()));
+                                }
+                                AssetAction::None => {}
+                            }
+                        }
+                        2 if self.show_scene_tree => {
+                            let current_state = if let Some(tl) = &self.timeline {
+                                Player::state_at(tl, self.current_time)
+                            } else {
+                                HashMap::new()
+                            };
+                            SceneTreePanel::show(
+                                ui,
+                                self.timeline.as_ref(),
+                                &current_state,
+                                &mut self.selected_mobject,
+                            );
+                        }
+                        _ => {}
                     }
                 });
         }
@@ -368,15 +580,15 @@ impl eframe::App for MathOxideApp {
         if self.show_inspector {
             egui::SidePanel::right("right_inspector_panel")
                 .resizable(true)
-                .default_width(240.0)
-                .min_width(170.0)
+                .default_width(260.0)
+                .min_width(180.0)
                 .show(ctx, |ui| {
                     let current_state = if let Some(tl) = &self.timeline {
                         Player::state_at(tl, self.current_time)
                     } else {
                         HashMap::new()
                     };
-                    InspectorPanel::show(
+                    let inspector_action = InspectorPanel::show(
                         ui,
                         self.timeline.as_ref(),
                         &current_state,
@@ -385,6 +597,20 @@ impl eframe::App for MathOxideApp {
                         &mut self.camera,
                         self.current_time,
                     );
+
+                    if let InspectorAction::ApplyShift { id, dx, dy } = inspector_action {
+                        if let Some(updated_code) = apply_shift_to_dsl(&self.editor_panel.code, &id, dx, dy) {
+                            self.editor_panel.code = updated_code;
+                            self.overrides.remove(&id);
+                            let (tl, err) = compile_code(&self.editor_panel.code);
+                            if let Some(t) = tl {
+                                self.timeline = Some(t);
+                            }
+                            self.editor_panel.set_error(err);
+                            self.editor_panel.is_dirty = true;
+                            self.set_status(format!("Applied position ({:+.2}, {:+.2}) to code for '{}'", dx, dy, id));
+                        }
+                    }
                 });
         }
 
@@ -407,6 +633,59 @@ impl eframe::App for MathOxideApp {
     }
 }
 
+fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<String> {
+    let mut lines: Vec<String> = code.lines().map(|s| s.to_string()).collect();
+    let mut modified = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        if words.len() >= 2 && words[1] == target_id {
+            if let Some(at_idx) = line.find("at (") {
+                if let Some(close_idx) = line[at_idx..].find(')') {
+                    let full_close = at_idx + close_idx;
+                    let inner = &line[at_idx + 4..full_close];
+                    let parts: Vec<&str> = inner.split(',').collect();
+                    if parts.len() == 2 {
+                        let orig_x: f32 = parts[0].trim().parse().unwrap_or(0.0);
+                        let orig_y: f32 = parts[1].trim().parse().unwrap_or(0.0);
+                        let new_at = format!("at ({:.2}, {:.2})", orig_x + dx, orig_y + dy);
+                        let mut new_line = line[..at_idx].to_string();
+                        new_line.push_str(&new_at);
+                        new_line.push_str(&line[full_close + 1..]);
+                        *line = new_line;
+                        modified = true;
+                        break;
+                    }
+                }
+            } else if let Some(id_pos) = line.find(target_id) {
+                let insert_pos = id_pos + target_id.len();
+                let new_at = format!(" at ({:.2}, {:.2})", dx, dy);
+                let mut new_line = line[..insert_pos].to_string();
+                new_line.push_str(&new_at);
+                new_line.push_str(&line[insert_pos..]);
+                *line = new_line;
+                modified = true;
+                break;
+            }
+        }
+    }
+
+    if modified {
+        let mut res = lines.join("\n");
+        if code.ends_with('\n') {
+            res.push('\n');
+        }
+        Some(res)
+    } else {
+        None
+    }
+}
+
 fn compile_code(code: &str) -> (Option<Timeline>, Option<String>) {
     match mo_dsl::parse_or_report(code) {
         Ok(tl) => (Some(tl), None),
@@ -416,8 +695,8 @@ fn compile_code(code: &str) -> (Option<Timeline>, Option<String>) {
 
 fn default_starter_code() -> String {
     r#"// MathOxide demo scene — circle drawn, square fades in, circle morphs into it.
-circle c at (0,0) r=2 fill=#58C4DD33, stroke=blue, sw=6;
-rect s at (3,0) w=3, h=3 fill=#FC625533, stroke=red, sw=4;
+circle c at (0, 0) r=2 fill=#58C4DD33, stroke=blue, sw=6;
+rect s at (3, 0) w=3, h=3 fill=#FC625533, stroke=red, sw=4;
 play showCreation(c) 2s smooth;
 wait 0.5s;
 play fadeIn(s) 1s smooth;
@@ -426,13 +705,22 @@ wait 0.5s;
 "#.into()
 }
 
-fn shapes_preset_code() -> String {
-    r#"// MathOxide shapes & transforms demo
-circle c1 at (0,0) r=1.5 fill=#58C4DD55, stroke=cyan, sw=4;
-rect r1 at (0,0) w=2.5, h=2.5 fill=#FC625555, stroke=red, sw=4;
-play showCreation(c1) 1.5s smooth;
-play transform(c1, r1) 1.2s smooth;
-play rotate(c1, 3.14159) 1.5s smooth;
+fn new_asset_template() -> String {
+    r#"// MathOxide Component Asset
+circle c at (0, 0) r=1.5 fill=#58C4DD33, stroke=cyan, sw=3;
+tex label at (0, -2) text="f(x) = \sin(x)" size=0.8;
+play showCreation(c) 1.5s smooth;
+play fadeIn(label) 1.0s smooth;
+wait 0.5s;
 "#.into()
 }
 
+fn new_master_template() -> String {
+    r#"// MathOxide Master Composition
+// Import and sequence modular assets across the timeline
+import "assets/euler_formula.moa" as euler at (0, 1.5);
+import "assets/sine_wave.moa" as sine at (0, -1.5);
+
+wait 1s;
+"#.into()
+}

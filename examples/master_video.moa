@@ -1,0 +1,12 @@
+// MathOxide Master Composition
+// Demonstrating video-editor style clip assembly using modular imports
+text title text="MathOxide Modular Scene Composition" at (0, 3.4) size=0.7 color=white;
+play write(title) 1.0s smooth;
+
+// Asset 1: Euler's identity placed in the upper region
+import "assets/euler_formula.moa" as euler at (0, 1.8);
+
+// Asset 2: Sine wave plot placed in the lower region
+import "assets/sine_wave.moa" as plot at (0, -2.0);
+
+wait 1.0s;

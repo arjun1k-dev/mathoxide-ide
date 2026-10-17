@@ -30,6 +30,15 @@ enum Cmd {
         height: u32,
         #[arg(long, default_value = "60")]
         fps: u32,
+        /// 3D Camera tilt / elevation in degrees (e.g. 60.0).
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
+        phi: f32,
+        /// 3D Camera azimuth in degrees (e.g. -45.0).
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
+        theta: f32,
+        /// 3D Camera roll in degrees.
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
+        gamma: f32,
     },
     /// Open an interactive preview window (space = play/pause, arrows = scrub,
     /// drag = pan, wheel = zoom, drag object = move it).
@@ -61,18 +70,25 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Render { file, out, frame, width, height, fps } => {
+        Cmd::Render { file, out, frame, width, height, fps, phi, theta, gamma } => {
             let src = std::fs::read_to_string(&file).context("read file")?;
             let tl = mo_dsl::parse(&src).map_err(|d| anyhow::anyhow!("{d:?}"))?;
             let renderer = mo_render::Renderer::offscreen(width, height)?;
+            let mut camera = mo_core::camera::Camera::default();
+            camera.width = width as f32;
+            camera.height = height as f32;
+            camera.phi = phi.to_radians();
+            camera.theta = theta.to_radians();
+            camera.gamma = gamma.to_radians();
+
             match frame {
                 Some(t) => {
                     let state = mo_core::scene::Player::state_at(&tl, t);
-                    let img = renderer.render(&state);
+                    let img = renderer.render_with_camera(&state, &camera);
                     img.save(&out).context("save png")?;
                     println!("wrote frame @{t}s -> {out}");
                 }
-                None => render_video(&renderer, &tl, &out, fps)?,
+                None => render_video(&renderer, &tl, &out, fps, &camera)?,
             }
         }
         Cmd::Preview { file } => {
@@ -110,6 +126,7 @@ fn render_video(
     tl: &mo_core::scene::Timeline,
     out: &str,
     fps: u32,
+    camera: &mo_core::camera::Camera,
 ) -> Result<()> {
     let duration = tl.duration();
     if duration <= 0.0 {
@@ -141,7 +158,7 @@ fn render_video(
     for frame in 0..total {
         let t = frame as f32 / fps as f32;
         let state = mo_core::scene::Player::state_at(tl, t);
-        let img = renderer.render(&state);
+        let img = renderer.render_with_camera(&state, camera);
         stdin.write_all(img.as_raw())?;
     }
     drop(stdin);

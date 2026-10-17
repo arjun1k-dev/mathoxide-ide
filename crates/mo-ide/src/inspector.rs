@@ -4,6 +4,11 @@ use mo_core::scene::Timeline;
 use mo_core::vgroup::VGroup;
 use std::collections::HashMap;
 
+pub enum InspectorAction {
+    None,
+    ApplyShift { id: String, dx: f32, dy: f32 },
+}
+
 /// Runtime inspector and live override manager.
 pub struct InspectorPanel;
 
@@ -16,7 +21,9 @@ impl InspectorPanel {
         overrides: &mut HashMap<String, (f32, f32)>,
         camera: &mut Camera,
         current_time: f32,
-    ) {
+    ) -> InspectorAction {
+        let mut action = InspectorAction::None;
+
         ui.heading("Inspector");
         ui.separator();
 
@@ -27,7 +34,7 @@ impl InspectorPanel {
                 if ui.button("Deselect").clicked() {
                     *selected_mobject = None;
                 }
-                return;
+                return action;
             };
 
             ui.horizontal(|ui| {
@@ -71,11 +78,18 @@ impl InspectorPanel {
 
                 if overrides.contains_key(&id) {
                     ui.add_space(4.0);
+                    ui.colored_label(
+                        Color32::from_rgb(255, 158, 100),
+                        format!("Shift Override: ({:+.2}, {:+.2})", current_shift.0, current_shift.1),
+                    );
                     ui.horizontal(|ui| {
-                        ui.colored_label(
-                            Color32::from_rgb(255, 158, 100),
-                            format!("Shift Override: ({:+.2}, {:+.2})", current_shift.0, current_shift.1),
-                        );
+                        if ui.button("💾 Apply to Code").on_hover_text("Write updated position into editor code").clicked() {
+                            action = InspectorAction::ApplyShift {
+                                id: id.clone(),
+                                dx: current_shift.0,
+                                dy: current_shift.1,
+                            };
+                        }
                         if ui.button("Reset Shift").clicked() {
                             overrides.remove(&id);
                         }
@@ -153,7 +167,7 @@ impl InspectorPanel {
 
             if let Some(shift) = overrides.get(&id) {
                 if ui.button("📋 Copy Shift to Clipboard").clicked() {
-                    let dsl_snippet = format!("shift: [{:.2}, {:.2}]", shift.0, shift.1);
+                    let dsl_snippet = format!("at: ({:+.2}, {:+.2})", shift.0, shift.1);
                     ui.ctx().copy_text(dsl_snippet);
                 }
             }
@@ -174,13 +188,29 @@ impl InspectorPanel {
 
                 ui.add_space(6.0);
 
-                ui.collapsing("Camera", |ui| {
+                ui.collapsing("Camera (2D & 3D)", |ui| {
                     ui.label(format!("Center: ({:.2}, {:.2})", camera.center.x, camera.center.y));
                     ui.label(format!("Frame Height: {:.2}", camera.frame_height));
-                    ui.label(format!("Aspect: {:.2}", camera.aspect_ratio()));
-                    if ui.button("Reset Camera (R)").clicked() {
-                        camera.center = glam::Vec3::ZERO;
-                        camera.frame_height = 8.0;
+                    ui.label(format!("Aspect Ratio: {:.2}", camera.aspect_ratio()));
+
+                    ui.add_space(4.0);
+                    ui.label("3D Orbit Orientation:");
+                    let mut phi_deg = camera.phi.to_degrees();
+                    if ui.add(egui::Slider::new(&mut phi_deg, -89.0..=89.0).text("Tilt φ (°)")).changed() {
+                        camera.phi = phi_deg.to_radians();
+                    }
+                    let mut theta_deg = camera.theta.to_degrees();
+                    if ui.add(egui::Slider::new(&mut theta_deg, -180.0..=180.0).text("Azimuth θ (°)")).changed() {
+                        camera.theta = theta_deg.to_radians();
+                    }
+                    let mut gamma_deg = camera.gamma.to_degrees();
+                    if ui.add(egui::Slider::new(&mut gamma_deg, -180.0..=180.0).text("Roll γ (°)")).changed() {
+                        camera.gamma = gamma_deg.to_radians();
+                    }
+
+                    ui.add_space(4.0);
+                    if ui.button("Reset Camera to 2D (R)").clicked() {
+                        camera.reset();
                     }
                 });
 
@@ -200,5 +230,7 @@ impl InspectorPanel {
                 ui.label("No active scene loaded.");
             }
         }
+
+        action
     }
 }

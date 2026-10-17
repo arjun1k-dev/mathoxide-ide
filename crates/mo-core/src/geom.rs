@@ -177,6 +177,136 @@ pub fn text_placeholder(width: f32, height: f32) -> VGroup {
     rect(width, height, Vec3::ZERO, color::hex("#33333388"), color::WHITE, 2.0)
 }
 
+/// 3D Coordinate axes with X (red), Y (cyan), and Z (purple) axes.
+pub fn axes_3d(
+    x_range: (f32, f32),
+    y_range: (f32, f32),
+    z_range: (f32, f32),
+    center: Vec3,
+    stroke_width: f32,
+) -> VGroup {
+    let mut g = VGroup::new();
+
+    // X axis (Red)
+    let x_start = center + Vec3::new(x_range.0, 0.0, 0.0);
+    let x_end = center + Vec3::new(x_range.1, 0.0, 0.0);
+    g.append(arrow(x_start, x_end, color::hex("#FC6255"), stroke_width, 0.35, 0.2));
+
+    // Y axis (Cyan)
+    let y_start = center + Vec3::new(0.0, y_range.0, 0.0);
+    let y_end = center + Vec3::new(0.0, y_range.1, 0.0);
+    g.append(arrow(y_start, y_end, color::hex("#58C4DD"), stroke_width, 0.35, 0.2));
+
+    // Z axis (Purple)
+    let z_start = center + Vec3::new(0.0, 0.0, z_range.0);
+    let z_end = center + Vec3::new(0.0, 0.0, z_range.1);
+    g.append(arrow(z_start, z_end, color::hex("#9A72DE"), stroke_width, 0.35, 0.2));
+
+    g
+}
+
+/// 3D Wireframe Cube with 12 edges.
+pub fn cube(side: f32, center: Vec3, stroke: [f32; 4], stroke_width: f32) -> VGroup {
+    let mut g = VGroup::new();
+    let s = side * 0.5;
+
+    let v = [
+        center + Vec3::new(-s, -s, -s),
+        center + Vec3::new( s, -s, -s),
+        center + Vec3::new( s,  s, -s),
+        center + Vec3::new(-s,  s, -s),
+        center + Vec3::new(-s, -s,  s),
+        center + Vec3::new( s, -s,  s),
+        center + Vec3::new( s,  s,  s),
+        center + Vec3::new(-s,  s,  s),
+    ];
+
+    let edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ];
+
+    for &(i, j) in &edges {
+        g.append(line(v[i], v[j], stroke, stroke_width));
+    }
+    g
+}
+
+/// 3D Wireframe Sphere with latitude/longitude circles.
+pub fn sphere(radius: f32, center: Vec3, stroke: [f32; 4], stroke_width: f32) -> VGroup {
+    let mut g = VGroup::new();
+
+    // Equatorial XY ring
+    g.append(arc(radius, 0.0, std::f32::consts::TAU, center, [0.0; 4], stroke, stroke_width));
+
+    // Longitudinal XZ ring
+    let mut xz_ring = arc(radius, 0.0, std::f32::consts::TAU, Vec3::ZERO, [0.0; 4], stroke, stroke_width);
+    for p in &mut xz_ring.points {
+        let v = Vec3::from(p.point);
+        p.point = [v.x, 0.0, v.y];
+    }
+    xz_ring.shift(center);
+    g.append(xz_ring);
+
+    // Longitudinal YZ ring
+    let mut yz_ring = arc(radius, 0.0, std::f32::consts::TAU, Vec3::ZERO, [0.0; 4], stroke, stroke_width);
+    for p in &mut yz_ring.points {
+        let v = Vec3::from(p.point);
+        p.point = [0.0, v.x, v.y];
+    }
+    yz_ring.shift(center);
+    g.append(yz_ring);
+
+    g
+}
+
+/// 3D Parametric Surface wireframe grid: z = f(x, y).
+pub fn surface_3d<F>(
+    f: F,
+    x_range: (f32, f32),
+    y_range: (f32, f32),
+    resolution: (usize, usize),
+    stroke: [f32; 4],
+    stroke_width: f32,
+) -> VGroup
+where
+    F: Fn(f32, f32) -> f32,
+{
+    let mut g = VGroup::new();
+    let (nx, ny) = (resolution.0.max(2), resolution.1.max(2));
+    let dx = (x_range.1 - x_range.0) / (nx - 1) as f32;
+    let dy = (y_range.1 - y_range.0) / (ny - 1) as f32;
+
+    for j in 0..ny {
+        let y = y_range.0 + (j as f32) * dy;
+        let mut line_pts = Vec::with_capacity(nx);
+        for i in 0..nx {
+            let x = x_range.0 + (i as f32) * dx;
+            let z = f(x, y);
+            line_pts.push(Vec3::new(x, y, z));
+        }
+        for i in 0..nx - 1 {
+            g.append(line(line_pts[i], line_pts[i + 1], stroke, stroke_width));
+        }
+    }
+
+    for i in 0..nx {
+        let x = x_range.0 + (i as f32) * dx;
+        let mut line_pts = Vec::with_capacity(ny);
+        for j in 0..ny {
+            let y = y_range.0 + (j as f32) * dy;
+            let z = f(x, y);
+            line_pts.push(Vec3::new(x, y, z));
+        }
+        for j in 0..ny - 1 {
+            g.append(line(line_pts[j], line_pts[j + 1], stroke, stroke_width));
+        }
+    }
+
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

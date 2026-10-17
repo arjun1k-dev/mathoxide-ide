@@ -252,11 +252,14 @@ enum Val {
     Mat2([f32; 4]),
 }
 
+use std::path::PathBuf;
+
 #[derive(Debug)]
 enum RawStmt {
     Decl { kind: String, name: String, params: Vec<(String, Val)> },
     Play { name: String, args: Vec<String>, run_time: Option<f32>, rate: Option<String> },
     Wait(f32),
+    Import { path: String, alias: Option<String>, at: Option<Vec3> },
 }
 
 struct P {
@@ -448,6 +451,41 @@ impl P {
         self.expect(&Tok::Semi, "`;`")?;
         Ok(RawStmt::Wait(f))
     }
+
+    fn import_stmt(&mut self) -> Result<RawStmt, Diag> {
+        let (l, c) = self.pos();
+        self.idx += 1; // "import"
+        let path = match self.bump() {
+            Some(Tok::Str(s)) => s,
+            _ => return Err(Diag { line: l, col: c, message: "expected file path string after `import`".into() }),
+        };
+
+        let mut alias = None;
+        if let Some(Tok::Ident(k)) = self.peek() {
+            if k == "as" {
+                self.idx += 1;
+                match self.bump() {
+                    Some(Tok::Ident(name)) => alias = Some(name),
+                    _ => return Err(self.err_here("expected identifier after `as`")),
+                }
+            }
+        }
+
+        let mut at = None;
+        if let Some(Tok::Ident(k)) = self.peek() {
+            if k == "at" {
+                self.idx += 1;
+                match self.value()? {
+                    Val::V(v) => at = Some(v),
+                    _ => return Err(self.err_here("expected vector after `at`")),
+                }
+            }
+        }
+
+        self.eat(&Tok::Comma);
+        self.expect(&Tok::Semi, "`;`")?;
+        Ok(RawStmt::Import { path, alias, at })
+    }
 }
 
 // -- Lowering -----------------------------------------------------------------
@@ -464,6 +502,10 @@ fn get_v(params: &[(String, Val)], k: &str) -> Option<Vec3> {
         Val::V(v) => Some(*v),
         _ => None,
     })
+}
+
+fn get_pair(params: &[(String, Val)], k: &str) -> Option<(f32, f32)> {
+    get_v(params, k).map(|v| (v.x, v.y))
 }
 
 fn get_c(params: &[(String, Val)], k: &str) -> Option<[f32; 4]> {
@@ -661,6 +703,37 @@ fn build_object(
             g.shift(at);
             g
         }
+        "axes3d" | "three_d_axes" => {
+            let xr = get_pair(params, "x").unwrap_or((-4.0, 4.0));
+            let yr = get_pair(params, "y").unwrap_or((-4.0, 4.0));
+            let zr = get_pair(params, "z").unwrap_or((-3.0, 3.0));
+            let sw = get_f(params, "sw").unwrap_or(2.5);
+            mo_core::geom::axes_3d(xr, yr, zr, at, sw)
+        }
+        "cube" => {
+            let side = get_f(params, "side").or_else(|| get_f(params, "s")).or_else(|| get_f(params, "size")).unwrap_or(2.0);
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let sw = get_f(params, "sw").unwrap_or(2.0);
+            mo_core::geom::cube(side, at, c, sw)
+        }
+        "sphere" => {
+            let radius = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(1.5);
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let sw = get_f(params, "sw").unwrap_or(2.0);
+            mo_core::geom::sphere(radius, at, c, sw)
+        }
+        "surface3d" | "surface" => {
+            let expr_str = get_s(params, "expr").or_else(|| get_s(params, "f")).unwrap_or_else(|| "sin(x)*cos(y)".into());
+            let xr = get_pair(params, "x").unwrap_or((-3.0, 3.0));
+            let yr = get_pair(params, "y").unwrap_or((-3.0, 3.0));
+            let res_val = get_f(params, "res").or_else(|| get_f(params, "samples")).unwrap_or(16.0) as usize;
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#58C4DD"));
+            let sw = get_f(params, "sw").unwrap_or(1.5);
+            let expr = mo_core::expr::Expr::parse(&expr_str)?;
+            let mut g = mo_core::geom::surface_3d(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw);
+            g.shift(at);
+            g
+        }
         other => return Err(format!("unknown object kind `{other}`")),
     };
 
@@ -733,6 +806,81 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                 tl.stmts.push(Stmt::Play(TimedAnim::new(anim, run_time, &rate_name)));
             }
             RawStmt::Wait(d) => tl.stmts.push(Stmt::Wait(d)),
+            RawStmt::Import { path, alias, at } => {
+                let candidates = [
+                    PathBuf::from(&path),
+                    PathBuf::from("assets").join(&path),
+                    PathBuf::from("examples").join(&path),
+                    PathBuf::from("../..").join(&path),
+                    PathBuf::from("../../assets").join(&path),
+                    PathBuf::from("../../examples").join(&path),
+                ];
+                let resolved = candidates
+                    .iter()
+                    .find(|p| p.exists())
+                    .ok_or_else(|| format!("Could not find imported asset `{path}`"))?;
+
+                let content = std::fs::read_to_string(resolved).map_err(|e| {
+                    format!("Failed to read imported asset `{}`: {e}", resolved.display())
+                })?;
+
+                let imported_tl = parse(&content).map_err(|diags| {
+                    format!(
+                        "Error in imported asset `{}`: {}",
+                        resolved.display(),
+                        diags
+                            .iter()
+                            .map(|d| d.message.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+
+                let shift_vec = at.unwrap_or(Vec3::ZERO);
+                for stmt in imported_tl.stmts {
+                    match stmt {
+                        Stmt::Decl { id, mut obj } => {
+                            if shift_vec != Vec3::ZERO {
+                                obj.shift(shift_vec);
+                            }
+                            let target_name = if let Some(a) = &alias {
+                                format!("{a}_{id}")
+                            } else {
+                                id.clone()
+                            };
+                            declared.insert(target_name.clone(), obj.clone());
+                            tl.stmts.push(Stmt::Decl { id: target_name, obj });
+                        }
+                        Stmt::Play(mut anim) => {
+                            if shift_vec != Vec3::ZERO {
+                                if let Animation::Transform { ref mut target, .. } = anim.anim {
+                                    target.shift(shift_vec);
+                                }
+                            }
+                            if let Some(a) = &alias {
+                                let old_id = anim.anim.target_id().to_string();
+                                let new_id = format!("{a}_{old_id}");
+                                anim.anim = match anim.anim {
+                                    Animation::ShowCreation { .. } => Animation::ShowCreation { id: new_id },
+                                    Animation::FadeIn { shift, .. } => Animation::FadeIn { id: new_id, shift },
+                                    Animation::FadeOut { shift, .. } => Animation::FadeOut { id: new_id, shift },
+                                    Animation::Grow { anchor, .. } => Animation::Grow { id: new_id, anchor },
+                                    Animation::Rotate { angle, .. } => Animation::Rotate { id: new_id, angle },
+                                    Animation::SpinInFromNothing { .. } => Animation::SpinInFromNothing { id: new_id },
+                                    Animation::ShrinkToCenter { .. } => Animation::ShrinkToCenter { id: new_id },
+                                    Animation::Indicate { scale_factor, color, .. } => Animation::Indicate { id: new_id, scale_factor, color },
+                                    Animation::Wiggle { angle, .. } => Animation::Wiggle { id: new_id, angle },
+                                    Animation::Transform { target, .. } => Animation::Transform { id: new_id, target },
+                                };
+                            }
+                            tl.stmts.push(Stmt::Play(anim));
+                        }
+                        Stmt::Wait(d) => {
+                            tl.stmts.push(Stmt::Wait(d));
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(tl)
@@ -757,6 +905,7 @@ pub fn parse(src: &str) -> Result<Timeline, Vec<Diag>> {
             None => break,
             Some(Tok::Ident(k)) if k == "play" => p.play_stmt().map(Some),
             Some(Tok::Ident(k)) if k == "wait" => p.wait_stmt().map(Some),
+            Some(Tok::Ident(k)) if k == "import" => p.import_stmt().map(Some),
             Some(Tok::Ident(_)) => p.obj_decl().map(Some),
             Some(t) => Err(p.err_here(&format!("unexpected token `{t:?}`"))),
         };
@@ -866,5 +1015,55 @@ mod tests {
         let tl = parse(src).expect("parses vector field and matrix transforms");
         assert_eq!(tl.duration(), 4.5);
         assert_eq!(tl.stmts.len(), 6);
+    }
+
+    #[test]
+    fn parses_3d_primitives() {
+        let src = r#"
+            axes3d a3d at (0,0,0) x=(-3,3) y=(-3,3) z=(-2,2) sw=2;
+            cube cb at (1,1,1) side=2 color=#58C4DD sw=2;
+            sphere sp at (-1,-1,0) r=1 color=#FC6255 sw=2;
+            surface3d surf at (0,0,0) expr="x^2 - y^2" x=(-2,2) y=(-2,2) res=8 color=yellow sw=1;
+            play showCreation(a3d) 1s;
+            play spinInFromNothing(cb) 1s;
+        "#;
+        let tl = parse(src).expect("parses 3d primitives");
+        assert_eq!(tl.duration(), 2.0);
+        assert_eq!(tl.initial_objects().len(), 4);
+    }
+
+    #[test]
+    fn parses_import_asset() {
+        let temp_dir = std::env::temp_dir();
+        let asset_file = temp_dir.join("test_imported_asset.moa");
+        std::fs::write(&asset_file, "circle sub_c at (0,0) r=1.5 stroke=blue;").expect("write temp asset");
+
+        let src = format!(r#"
+            import "{}" as my_asset at (2, 3);
+            play showCreation(my_asset_sub_c) 1s;
+        "#, asset_file.to_str().unwrap());
+
+        let tl = parse(&src).expect("parses import statement");
+        assert!(tl.initial_objects().contains_key("my_asset_sub_c"));
+        let obj = &tl.initial_objects()["my_asset_sub_c"];
+        let c = obj.center();
+        assert!((c.x - 2.0).abs() < 1e-3);
+        assert!((c.y - 3.0).abs() < 1e-3);
+
+        let _ = std::fs::remove_file(asset_file);
+    }
+
+    #[test]
+    fn parses_master_video_and_demo_3d_files() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir.parent().unwrap().parent().unwrap();
+
+        let master_code = std::fs::read_to_string(root.join("examples/master_video.moa")).expect("read master_video.moa");
+        let master_tl = parse(&master_code).expect("parses master_video.moa");
+        assert!(master_tl.duration() > 0.0);
+
+        let demo_3d_code = std::fs::read_to_string(root.join("examples/demo_3d.moa")).expect("read demo_3d.moa");
+        let demo_3d_tl = parse(&demo_3d_code).expect("parses demo_3d.moa");
+        assert!(demo_3d_tl.duration() > 0.0);
     }
 }

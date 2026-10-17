@@ -24,6 +24,12 @@ pub struct Camera {
     pub width: f32,
     pub height: f32,
     pub fov: f32,
+    /// Elevation / polar tilt angle (radians). 0.0 is top-down (2D). E.g. 70 deg for 3D perspective.
+    pub phi: f32,
+    /// Azimuthal angle around Z axis (radians).
+    pub theta: f32,
+    /// Roll angle around camera view axis (radians).
+    pub gamma: f32,
 }
 
 impl Default for Camera {
@@ -34,6 +40,9 @@ impl Default for Camera {
             width: 1920.0,
             height: 1080.0,
             fov: 45.0_f32.to_radians(),
+            phi: 0.0,
+            theta: 0.0,
+            gamma: 0.0,
         }
     }
 }
@@ -42,8 +51,16 @@ impl Camera {
     pub fn uniforms(&self) -> FrameUniforms {
         let aspect = self.width / self.height;
         let focal_distance = 0.5 * self.frame_height / (self.fov / 2.0).tan();
-        let eye = self.center + Vec3::Z * focal_distance;
-        let view = Mat4::from_translation(-self.center);
+
+        // 3D camera orientation: roll (gamma) * tilt (phi) * azimuth (theta)
+        let rot = Mat4::from_rotation_z(self.gamma)
+            * Mat4::from_rotation_x(self.phi)
+            * Mat4::from_rotation_z(self.theta);
+
+        let view = rot * Mat4::from_translation(-self.center);
+        let inv_rot = rot.inverse();
+        let eye = self.center + inv_rot.transform_vector3(Vec3::new(0.0, 0.0, focal_distance));
+
         FrameUniforms {
             view,
             frame_rescale_factors: [
@@ -54,15 +71,30 @@ impl Camera {
             frame_scale: self.frame_height / 2.0,
             camera_position: eye.to_array(),
             pixel_size: self.frame_height / self.height,
-            light_position: (eye + Vec3::new(-10.0, 10.0, 0.0)).to_array(),
+            light_position: (eye + inv_rot.transform_vector3(Vec3::new(-10.0, 10.0, 10.0))).to_array(),
             _pad: 0.0,
         }
+    }
+
+    /// Rotate the 3D camera angles (d_phi in radians, d_theta in radians).
+    pub fn orbit(&mut self, d_phi: f32, d_theta: f32) {
+        self.phi = (self.phi + d_phi).clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+        self.theta = (self.theta + d_theta) % std::f32::consts::TAU;
     }
 
     /// Pan the frame by scene-units delta in screen space.
     pub fn pan(&mut self, dx: f32, dy: f32) {
         self.center.x -= dx;
         self.center.y -= dy;
+    }
+
+    /// Reset camera to default 2D center view.
+    pub fn reset(&mut self) {
+        self.center = Vec3::ZERO;
+        self.frame_height = 8.0;
+        self.phi = 0.0;
+        self.theta = 0.0;
+        self.gamma = 0.0;
     }
 
     pub fn zoom(&mut self, factor: f32) {

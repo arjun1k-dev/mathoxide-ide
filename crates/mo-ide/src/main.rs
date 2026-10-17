@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod editor;
 mod export;
 mod inspector;

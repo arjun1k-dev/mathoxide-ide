@@ -70,23 +70,47 @@ pub fn sample(anim: &TimedAnim, snapshot: &VGroup, target: &VGroup, t: f32) -> O
             Some(a_pts)
         }
         Animation::ShowCreation { .. } => {
-            let partial = target.partial(0.0, a);
-            let mut p = partial;
-            for (i, pt) in p.points.iter_mut().enumerate() {
-                if i < target.points.len() {
-                    pt.fill_rgba = target.points[i].fill_rgba;
-                    if a < 1.0 {
-                        pt.fill_rgba[3] = 0.0;
+            let has_fill = target.points.iter().any(|p| p.fill_rgba[3] > 0.0);
+            let has_stroke = target.points.iter().any(|p| p.stroke_width > 0.0 && p.stroke_rgba[3] > 0.0);
+
+            if !has_fill && has_stroke {
+                // Purely stroked curves, coordinate axes, and path lines:
+                // trace path progressively with exact stroke width
+                let partial = target.partial(0.0, a);
+                Some(partial)
+            } else {
+                // Text, LaTeX formulas, or filled shapes:
+                let subs = target.extract_subpaths();
+                if subs.len() <= 1 {
+                    // Single filled shape: smooth fade in with exact styling
+                    let mut out = target.clone();
+                    fade(&mut out, a, false);
+                    Some(out)
+                } else {
+                    // Multi-glyph text / equation: write glyphs sequentially from left to right
+                    let m = subs.len();
+                    let mut out = VGroup::new();
+                    let window = 0.25_f32;
+                    let step = (1.0 - window) / (m.saturating_sub(1).max(1) as f32);
+
+                    for (k, mut sub) in subs.into_iter().enumerate() {
+                        let start_k = (k as f32) * step;
+                        if a <= start_k {
+                            continue;
+                        }
+                        let p = ((a - start_k) / window).clamp(0.0, 1.0);
+                        fade(&mut sub, p, false);
+
+                        let start_idx = out.points.len();
+                        out.points.extend(sub.points);
+                        out.subpaths.push(crate::vgroup::SubPath {
+                            start: start_idx,
+                            end: out.points.len(),
+                        });
                     }
-                    pt.stroke_rgba = target.points[i].stroke_rgba;
-                    pt.stroke_width = target.points[i].stroke_width;
-                    if (pt.stroke_width <= 0.0 || pt.stroke_rgba[3] <= 0.0) && target.points[i].fill_rgba[3] > 0.0 {
-                        pt.stroke_rgba = target.points[i].fill_rgba;
-                        pt.stroke_width = 2.0;
-                    }
+                    Some(out)
                 }
             }
-            Some(p)
         }
         Animation::FadeIn { shift, .. } => {
             out.interpolate(snapshot, target, 1.0);
