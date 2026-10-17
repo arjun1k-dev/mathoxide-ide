@@ -83,7 +83,7 @@ fn handle_request(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
                 "tools": [
                     {
                         "name": "list_assets",
-                        "description": "List all modular .moa animation assets and master compositions in the project with tags, line counts, and durations.",
+                        "description": "List all modular .moa animation assets and master compositions in the project with tags, line counts, durations, and a per-play timeline (start/end in seconds) so overlapping clips are known, not guessed.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -96,7 +96,7 @@ fn handle_request(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
                     },
                     {
                         "name": "read_asset",
-                        "description": "Read the source code and structural details of a specific .moa asset or composition file.",
+                        "description": "Read the source code and structural details of a specific .moa asset or composition file, including its per-play timeline with exact start/end times.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -249,8 +249,55 @@ fn handle_request(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
     }
 }
 
-fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {
-    match name {
+/// Short human/agent-readable label for a play animation.
+fn anim_label(a: &mo_core::anim::Animation) -> String {
+    use mo_core::anim::Animation;
+    match a {
+        Animation::ShowCreation { id } => format!("showCreation({id})"),
+        Animation::FadeIn { id, .. } => format!("fadeIn({id})"),
+        Animation::FadeOut { id, .. } => format!("fadeOut({id})"),
+        Animation::Grow { id, .. } => format!("growFromCenter({id})"),
+        Animation::Rotate { id, .. } => format!("rotate({id})"),
+        Animation::SpinInFromNothing { id } => format!("spinInFromNothing({id})"),
+        Animation::ShrinkToCenter { id } => format!("shrinkToCenter({id})"),
+        Animation::Indicate { id, .. } => format!("indicate({id})"),
+        Animation::Wiggle { id, .. } => format!("wiggle({id})"),
+        Animation::Transform { id, .. } => format!("transform({id})"),
+        Animation::CameraOrbit { .. } => "camera.orbit".into(),
+        Animation::CameraZoom { .. } => "camera.zoom".into(),
+        Animation::CameraMoveTo { .. } => "camera.move_to".into(),
+    }
+}
+
+/// Per-play start/end/overlap map of a timeline, in flat play order. Lets an
+/// agent know exactly which asset clips overlap instead of guessing.
+fn timeline_json(tl: &mo_core::scene::Timeline) -> Value {
+    let mut t = 0.0f32;
+    let entries: Vec<Value> = tl
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            mo_core::scene::Stmt::Play(a) => {
+                let e = json!({
+                    "start": (t * 100.0).round() / 100.0,
+                    "end": ((t + a.run_time) * 100.0).round() / 100.0,
+                    "run_time": a.run_time,
+                    "anim": anim_label(&a.anim),
+                });
+                t += a.run_time;
+                Some(e)
+            }
+            mo_core::scene::Stmt::Wait(d) => {
+                t += d;
+                None
+            }
+            mo_core::scene::Stmt::Decl { .. } => None,
+        })
+        .collect();
+    json!(entries)
+}
+
+fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {    match name {
         "list_assets" => {
             let base_dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(".");
             let project = PathBuf::from(base_dir);
@@ -270,7 +317,9 @@ fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {
                             if seen.insert(path.clone()) {
                                 if let Ok(code) = std::fs::read_to_string(&path) {
                                     let is_master = code.contains("import ");
-                                    let duration = mo_dsl::parse(&code).map(|tl| tl.duration()).unwrap_or(0.0);
+                                    let parsed = mo_dsl::parse(&code);
+                                    let duration = parsed.as_ref().map(|tl| tl.duration()).unwrap_or(0.0);
+                                    let timeline = parsed.map(|tl| timeline_json(&tl)).unwrap_or(json!([]));
                                     let line_count = code.lines().count();
                                     assets.push(json!({
                                         "path": path.to_string_lossy(),
@@ -278,6 +327,7 @@ fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {
                                         "is_master": is_master,
                                         "lines": line_count,
                                         "duration": duration,
+                                        "timeline": timeline,
                                     }));
                                 }
                             }
@@ -292,9 +342,12 @@ fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {
             let path_str = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing path"))?;
             let code = std::fs::read_to_string(path_str)?;
             let parsed = mo_dsl::parse(&code);
-            let (is_valid, duration, objects) = match parsed {
-                Ok(tl) => (true, tl.duration(), tl.initial_objects().keys().cloned().collect::<Vec<_>>()),
-                Err(_) => (false, 0.0, Vec::new()),
+            let (is_valid, duration, objects, timeline) = match parsed {
+                Ok(tl) => {
+                    let timeline = timeline_json(&tl);
+                    (true, tl.duration(), tl.initial_objects().keys().cloned().collect::<Vec<_>>(), timeline)
+                }
+                Err(_) => (false, 0.0, Vec::new(), json!([])),
             };
 
             Ok(json!({
@@ -302,7 +355,8 @@ fn execute_tool(name: &str, args: &Value) -> anyhow::Result<Value> {
                 "code": code,
                 "is_valid": is_valid,
                 "duration": duration,
-                "objects": objects
+                "objects": objects,
+                "timeline": timeline
             }))
         }
         "write_asset" => {
