@@ -457,6 +457,11 @@ fn anim_style(a: &TimedAnim) -> (String, Color32, Color32) {
         mo_core::anim::Animation::ShrinkToCenter { id } => format!("Shrink({})", id),
         mo_core::anim::Animation::Indicate { id, .. } => format!("Indicate({})", id),
         mo_core::anim::Animation::Wiggle { id, .. } => format!("Wiggle({})", id),
+        mo_core::anim::Animation::CameraOrbit { phi, theta } => {
+            format!("Orbit({:.0}\u{b0}, {:.0}\u{b0})", phi.to_degrees(), theta.to_degrees())
+        }
+        mo_core::anim::Animation::CameraZoom { factor } => format!("Zoom({:.2}x)", factor),
+        mo_core::anim::Animation::CameraMoveTo { x, y } => format!("MoveTo({:.1}, {:.1})", x, y),
     };
     let (fill, stroke) = match &a.anim {
         mo_core::anim::Animation::ShowCreation { .. } => (

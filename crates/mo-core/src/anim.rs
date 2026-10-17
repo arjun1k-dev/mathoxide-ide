@@ -24,6 +24,12 @@ pub enum Animation {
     Indicate { id: String, scale_factor: f32, color: Option<[f32; 4]> },
     /// Wiggle: rotates back and forth around center with decaying amplitude
     Wiggle { id: String, angle: f32 },
+    /// Camera orbit to absolute phi/theta tilt+azimuth (radians).
+    CameraOrbit { phi: f32, theta: f32 },
+    /// Camera zoom by multiplying frame height by 1/factor (factor > 1 = closer).
+    CameraZoom { factor: f32 },
+    /// Camera pan so the frame center lands at (x, y).
+    CameraMoveTo { x: f32, y: f32 },
 }
 
 impl Animation {
@@ -39,6 +45,9 @@ impl Animation {
             | Animation::ShrinkToCenter { id }
             | Animation::Indicate { id, .. }
             | Animation::Wiggle { id, .. } => id,
+            Animation::CameraOrbit { .. }
+            | Animation::CameraZoom { .. }
+            | Animation::CameraMoveTo { .. } => "",
         }
     }
 }
@@ -64,7 +73,9 @@ pub fn sample(anim: &TimedAnim, snapshot: &VGroup, target: &VGroup, t: f32) -> O
     let a = (crate::rate::by_name(&anim.rate).unwrap_or(crate::rate::smooth))(alpha);
     let mut out = snapshot.clone();
     match &anim.anim {
-        Animation::Transform { .. } => {
+        Animation::CameraOrbit { .. } | Animation::CameraZoom { .. } | Animation::CameraMoveTo { .. } => {
+            None // camera animations carry no mobject geometry
+        }        Animation::Transform { .. } => {
             let (mut a_pts, b_pts) = snapshot.align_with(target);
             a_pts.interpolate(&a_pts.clone(), &b_pts, a);
             Some(a_pts)

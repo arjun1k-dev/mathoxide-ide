@@ -84,7 +84,8 @@ fn main() -> Result<()> {
             match frame {
                 Some(t) => {
                     let state = mo_core::scene::Player::state_at(&tl, t);
-                    let img = renderer.render_with_camera(&state, &camera);
+                    let frame_cam = mo_core::scene::Player::camera_at(&tl, t, &camera);
+                    let img = renderer.render_with_camera(&state, &frame_cam);
                     img.save(&out).context("save png")?;
                     println!("wrote frame @{t}s -> {out}");
                 }
@@ -158,7 +159,9 @@ fn render_video(
     for frame in 0..total {
         let t = frame as f32 / fps as f32;
         let state = mo_core::scene::Player::state_at(tl, t);
-        let img = renderer.render_with_camera(&state, camera);
+        // Camera animations (camera.orbit/zoom/move_to) animate the camera over time.
+        let frame_cam = mo_core::scene::Player::camera_at(tl, t, camera);
+        let img = renderer.render_with_camera(&state, &frame_cam);
         stdin.write_all(img.as_raw())?;
     }
     drop(stdin);

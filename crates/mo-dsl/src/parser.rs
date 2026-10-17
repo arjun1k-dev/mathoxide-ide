@@ -28,6 +28,7 @@ enum Tok {
     Comma,
     Semi,
     Eq,
+    Dot,
 }
 
 struct Lexer<'a> {
@@ -141,6 +142,9 @@ impl<'a> Lexer<'a> {
                 message: format!("bad number `{s}`"),
             })?;
             Tok::Num(f)
+        } else if c == b'.' {
+            self.bump();
+            Tok::Dot
         } else if c == b'#' {
             self.bump();
             let mut s = String::new();
@@ -258,6 +262,7 @@ use std::path::PathBuf;
 enum RawStmt {
     Decl { kind: String, name: String, params: Vec<(String, Val)> },
     Play { name: String, args: Vec<String>, run_time: Option<f32>, rate: Option<String> },
+    CameraPlay { kind: String, params: Vec<(String, f32)>, run_time: Option<f32>, rate: Option<String> },
     Wait(f32),
     Import { path: String, alias: Option<String>, at: Option<Vec3> },
 }
@@ -399,6 +404,59 @@ impl P {
                 })
             }
         };
+        // camera.orbit(...) / camera.zoom(...) / camera.move_to(...)
+        if name == "camera" && self.eat(&Tok::Dot) {
+            let kind = match self.bump() {
+                Some(Tok::Ident(s)) => s,
+                _ => return Err(self.err_here("expected camera animation name (orbit/zoom/move_to)")),
+            };
+            if !matches!(kind.as_str(), "orbit" | "zoom" | "move_to") {
+                return Err(self.err_here(&format!("unknown camera animation `camera.{kind}`")));
+            }
+            self.expect(&Tok::LParen, "`(`")?;
+            let mut params: Vec<(String, f32)> = Vec::new();
+            loop {
+                match self.peek() {
+                    Some(Tok::RParen) | None => break,
+                    Some(Tok::Ident(k)) => {
+                        let k = k.clone();
+                        self.idx += 1;
+                        self.expect(&Tok::Eq, "`=`")?;
+                        let (l2, c2) = self.pos();
+                        let v = match self.bump() {
+                            Some(Tok::Num(f)) => f,
+                            _ => return Err(Diag { line: l2, col: c2, message: "expected number".into() }),
+                        };
+                        params.push((k, v));
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    Some(t) => return Err(self.err_here(&format!("unexpected `{t:?}` in camera animation args"))),
+                }
+            }
+            self.expect(&Tok::RParen, "`)`")?;
+            let run_time = match self.peek() {
+                Some(Tok::Num(f)) => {
+                    let f = *f;
+                    self.idx += 1;
+                    self.expect(&Tok::Ident("s".into()), "`s` after duration")?;
+                    Some(f)
+                }
+                _ => None,
+            };
+            let rate = match self.peek() {
+                Some(Tok::Ident(s)) if rate::by_name(s).is_some() => {
+                    let s = s.clone();
+                    self.idx += 1;
+                    Some(s)
+                }
+                _ => None,
+            };
+            self.eat(&Tok::Comma);
+            self.expect(&Tok::Semi, "`;`")?;
+            return Ok(RawStmt::CameraPlay { kind, params, run_time, rate });
+        }
         self.expect(&Tok::LParen, "`(`")?;
         let mut args = Vec::new();
         loop {
@@ -805,6 +863,38 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                 };
                 tl.stmts.push(Stmt::Play(TimedAnim::new(anim, run_time, &rate_name)));
             }
+            RawStmt::CameraPlay { kind, params, run_time, rate } => {
+                let run_time = run_time.unwrap_or(1.0);
+                let rate_name = rate.unwrap_or_else(|| "smooth".into());
+                if rate::by_name(&rate_name).is_none() {
+                    return Err(format!("unknown easing `{rate_name}`"));
+                }
+                let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| *v);
+                let anim = match kind.as_str() {
+                    "orbit" => {
+                        let phi_deg = get("phi").unwrap_or(0.0);
+                        let theta_deg = get("theta").unwrap_or(0.0);
+                        Animation::CameraOrbit {
+                            phi: phi_deg.to_radians(),
+                            theta: theta_deg.to_radians(),
+                        }
+                    }
+                    "zoom" => {
+                        let factor = get("factor").unwrap_or(1.0);
+                        if factor <= 0.0 {
+                            return Err("camera.zoom factor must be positive".into());
+                        }
+                        Animation::CameraZoom { factor }
+                    }
+                    "move_to" => {
+                        let x = get("x").unwrap_or(0.0);
+                        let y = get("y").unwrap_or(0.0);
+                        Animation::CameraMoveTo { x, y }
+                    }
+                    _ => return Err(format!("unknown camera animation `{kind}`")),
+                };
+                tl.stmts.push(Stmt::Play(TimedAnim::new(anim, run_time, &rate_name)));
+            }
             RawStmt::Wait(d) => tl.stmts.push(Stmt::Wait(d)),
             RawStmt::Import { path, alias, at } => {
                 let candidates = [
@@ -871,6 +961,10 @@ fn lower(raws: Vec<RawStmt>) -> Result<Timeline, String> {
                                     Animation::Indicate { scale_factor, color, .. } => Animation::Indicate { id: new_id, scale_factor, color },
                                     Animation::Wiggle { angle, .. } => Animation::Wiggle { id: new_id, angle },
                                     Animation::Transform { target, .. } => Animation::Transform { id: new_id, target },
+                                    // Camera animations have no object id to alias.
+                                    cam @ (Animation::CameraOrbit { .. }
+                                    | Animation::CameraZoom { .. }
+                                    | Animation::CameraMoveTo { .. }) => cam,
                                 };
                             }
                             tl.stmts.push(Stmt::Play(anim));
@@ -1065,5 +1159,63 @@ mod tests {
         let demo_3d_code = std::fs::read_to_string(root.join("examples/demo_3d.moa")).expect("read demo_3d.moa");
         let demo_3d_tl = parse(&demo_3d_code).expect("parses demo_3d.moa");
         assert!(demo_3d_tl.duration() > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    #[test]
+    fn parses_camera_anims() {
+        let src = r#"
+circle c at (0,0) r=1;
+play camera.orbit(phi=60, theta=-40) 2.0s smooth;
+play camera.zoom(factor=1.5) 1s;
+play camera.move_to(x=2, y=-1) 1.5s linear;
+"#;
+        let tl = parse(src).expect("camera scene parses");
+        let anims: Vec<&mo_core::anim::Animation> = tl
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                mo_core::scene::Stmt::Play(a) => Some(&a.anim),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(anims.len(), 3);
+        assert!(matches!(
+            anims[0],
+            mo_core::anim::Animation::CameraOrbit { phi, theta }
+            if (phi.to_degrees() - 60.0).abs() < 1e-3 && (theta.to_degrees() + 40.0).abs() < 1e-3
+        ));
+        assert!(matches!(
+            anims[1],
+            mo_core::anim::Animation::CameraZoom { factor } if (*factor - 1.5).abs() < 1e-4
+        ));
+        assert!(matches!(
+            anims[2],
+            mo_core::anim::Animation::CameraMoveTo { x, y } if *x == 2.0 && *y == -1.0
+        ));
+        assert!((tl.duration() - 4.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn camera_anim_error_has_position() {
+        let src = "play camera.orbit(phi=abc) 1s;\n";
+        let diags = parse(src).unwrap_err();
+        assert!(diags[0].message.contains("expected number"));
+        assert_eq!(diags[0].line, 1);
+    }
+
+    #[test]
+    fn camera_at_interpolates_and_finalizes() {
+        let src = "play camera.orbit(phi=60, theta=0) 2s smooth;";
+        let tl = parse(src).unwrap();
+        let base = mo_core::camera::Camera::default();
+        let mid = mo_core::scene::Player::camera_at(&tl, 1.0, &base);
+        assert!(mid.phi > 0.1 && mid.phi < 60.0_f32.to_radians());
+        let end = mo_core::scene::Player::camera_at(&tl, 5.0, &base);
+        assert!((end.phi - 60.0_f32.to_radians()).abs() < 1e-3);
     }
 }

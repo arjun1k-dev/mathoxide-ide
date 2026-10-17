@@ -88,6 +88,25 @@ impl ViewportPanel {
             HashMap::new()
         };
 
+        // Animated camera (camera.orbit / camera.zoom / camera.move_to) overrides
+        // the interactive base camera while the timeline defines camera motion.
+        let has_camera_anims = timeline.map(|tl| {
+            tl.stmts.iter().any(|s| {
+                matches!(s, mo_core::scene::Stmt::Play(a) if matches!(
+                    a.anim,
+                    mo_core::anim::Animation::CameraOrbit { .. }
+                        | mo_core::anim::Animation::CameraZoom { .. }
+                        | mo_core::anim::Animation::CameraMoveTo { .. }
+                ))
+            })
+        }).unwrap_or(false);
+        let cam_owned = if has_camera_anims {
+            Player::camera_at(timeline.unwrap(), current_time, camera)
+        } else {
+            camera.clone()
+        };
+        let cam: &Camera = &cam_owned;
+
         // Apply visual shift overrides
         for (id, (dx, dy)) in overrides.iter() {
             if let Some(g) = state.get_mut(id) {
@@ -99,7 +118,7 @@ impl ViewportPanel {
         let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport scene encoder"),
         });
-        renderer.draw_scene_pass(&state, camera, &mut encoder);
+        renderer.draw_scene_pass(&state, cam, &mut encoder);
         renderer.queue().submit(Some(encoder.finish()));
 
         // Center canvas inside available panel area
@@ -146,7 +165,7 @@ impl ViewportPanel {
         if let Some(pos) = cursor_in_screen {
             let local_x = pos.x - canvas_rect.left();
             let local_y = pos.y - canvas_rect.top();
-            let sc = camera.screen_to_scene(local_x, local_y);
+            let sc = cam.screen_to_scene(local_x, local_y);
             cursor_scene_pos = Some(sc);
 
             // Zoom via mouse wheel
@@ -245,8 +264,8 @@ impl ViewportPanel {
         if let Some(id) = selected_mobject {
             if let Some(group) = state.get(id) {
                 let (min, max) = group.bounds();
-                let p_min = camera.scene_to_screen(min[0], min[1]);
-                let p_max = camera.scene_to_screen(max[0], max[1]);
+                let p_min = cam.scene_to_screen(min[0], min[1]);
+                let p_max = cam.scene_to_screen(max[0], max[1]);
 
                 let screen_min = Pos2::new(canvas_rect.left() + p_min.x, canvas_rect.top() + p_min.y);
                 let screen_max = Pos2::new(canvas_rect.left() + p_max.x, canvas_rect.top() + p_max.y);
@@ -293,16 +312,16 @@ impl ViewportPanel {
         );
 
         // Top-right: FPS & 3D Orbit Status
-        let is_3d = camera.phi.abs() > 0.01 || camera.theta.abs() > 0.01;
+        let is_3d = cam.phi.abs() > 0.01 || cam.theta.abs() > 0.01;
         let camera_status = if is_3d {
             format!(
                 "🎥 3D Orbit: φ {}° θ {}° | {:.0} FPS",
-                camera.phi.to_degrees().round() as i32,
-                camera.theta.to_degrees().round() as i32,
+                cam.phi.to_degrees().round() as i32,
+                cam.theta.to_degrees().round() as i32,
                 fps
             )
         } else {
-            format!("🎥 2D View | Zoom {:.2}x | {:.0} FPS", 8.0 / camera.frame_height, fps)
+            format!("🎥 2D View | Zoom {:.2}x | {:.0} FPS", 8.0 / cam.frame_height, fps)
         };
 
         painter.text(

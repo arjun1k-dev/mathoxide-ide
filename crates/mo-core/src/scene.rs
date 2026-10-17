@@ -231,11 +231,77 @@ impl Player {
                                 break;
                             }
                         }
+                        Animation::CameraOrbit { .. }
+                        | Animation::CameraZoom { .. }
+                        | Animation::CameraMoveTo { .. } => {
+                            // No mobject effect; camera handled by camera_at.
+                            t_cursor = end;
+                            if t < end {
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
         state
+    }
+
+    /// Camera state at time `t`, animated by CameraOrbit/CameraZoom/CameraMoveTo
+    /// statements. `base` carries the interactive/user camera (pan, zoom, size);
+    /// animated values override it where the timeline says so.
+    pub fn camera_at(tl: &Timeline, t: f32, base: &crate::camera::Camera) -> crate::camera::Camera {
+        let mut cam = base.clone();
+        let mut t_cursor = 0.0;
+        for stmt in &tl.stmts {
+            let Stmt::Play(ta) = stmt else {
+                if let Stmt::Wait(dur) = stmt {
+                    t_cursor += dur;
+                    if t_cursor > t {
+                        break;
+                    }
+                }
+                continue;
+            };
+            let start = t_cursor;
+            let end = start + ta.run_time;
+            let alpha = ((t - start) / ta.run_time.max(1e-6)).clamp(0.0, 1.0);
+            let a = (crate::rate::by_name(&ta.rate).unwrap_or(crate::rate::smooth))(alpha);
+            let done = t >= end;
+            match &ta.anim {
+                Animation::CameraOrbit { phi, theta } => {
+                    // Interpolate from the value in effect at anim start.
+                    let (p0, th0) = if done { (*phi, *theta) } else { (cam.phi, cam.theta) };
+                    let interp = |target: f32, from: f32| from + (target - from) * a;
+                    cam.phi = interp(*phi, p0).clamp(
+                        -std::f32::consts::FRAC_PI_2 + 0.01,
+                        std::f32::consts::FRAC_PI_2 - 0.01,
+                    );
+                    cam.theta = interp(*theta, th0);
+                }
+                Animation::CameraZoom { factor } => {
+                    if done {
+                        cam.frame_height = (base.frame_height / factor).clamp(0.1, 100.0);
+                    } else {
+                        // Zoom blends the frame height toward its target.
+                        let target = base.frame_height / factor;
+                        cam.frame_height = (cam.frame_height + (target - cam.frame_height) * a)
+                            .clamp(0.1, 100.0);
+                    }
+                }
+                Animation::CameraMoveTo { x, y } => {
+                    let (x0, y0) = if done { (*x, *y) } else { (cam.center.x, cam.center.y) };
+                    cam.center.x = x0 + (*x - x0) * a;
+                    cam.center.y = y0 + (*y - y0) * a;
+                }
+                _ => {}
+            }
+            t_cursor = end;
+            if t < end {
+                break;
+            }
+        }
+        cam
     }
 }
 
