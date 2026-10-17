@@ -1,0 +1,18 @@
+[package]
+name = "mo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mo"
+path = "src/main.rs"
+
+[dependencies]
+mo-core = { workspace = true }
+mo-render = { workspace = true }
+mo-dsl = { workspace = true }
+mo-moab = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+image = { workspace = true }

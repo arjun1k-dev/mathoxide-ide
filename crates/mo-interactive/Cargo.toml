@@ -1,0 +1,11 @@
+[package]
+name = "mo-interactive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mo-core = { workspace = true }
+mo-render = { workspace = true }
+winit = { workspace = true }
+anyhow = { workspace = true }
