@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mathoxide": {
+      "command": "/home/arjun/Projects/mathoxide/target/release/mathoxide-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
