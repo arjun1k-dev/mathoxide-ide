@@ -487,11 +487,36 @@ impl eframe::App for MathOxideApp {
                 .default_height(110.0)
                 .min_height(75.0)
                 .show(ctx, |ui| {
-                    self.timeline_panel.show(
+                    let mut panel = std::mem::take(&mut self.timeline_panel);
+                    let tl_action = panel.show(
                         ui,
-                        self.timeline.as_ref(),
+                        self.timeline.as_mut(),
                         &mut self.current_time,
                     );
+                    self.timeline_panel = panel;
+                    match tl_action {
+                        Some(crate::timeline::TimelineAction::Edited) => {
+                            self.editor_panel.is_dirty = true;
+                        }
+                        Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
+                            match crate::timeline::apply_timings_to_dsl(&self.editor_panel.code, &run_times) {
+                                Some(new_code) => {
+                                    self.editor_panel.code = new_code;
+                                    let (tl, err) = compile_code(&self.editor_panel.code);
+                                    if let Some(t) = tl {
+                                        self.timeline = Some(t);
+                                    }
+                                    self.editor_panel.set_error(err);
+                                    self.editor_panel.is_dirty = true;
+                                    self.set_status("Timeline timings written to code");
+                                }
+                                None => {
+                                    self.set_status("Cannot apply: scene contains imports — edit durations in the asset files");
+                                }
+                            }
+                        }
+                        None => {}
+                    }
                 });
         }
 
