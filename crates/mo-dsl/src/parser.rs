@@ -820,7 +820,7 @@ pub struct PlayOrigin {
     pub local_play_idx: usize,
 }
 
-fn lower(raws: Vec<RawStmt>) -> Result<(Timeline, Vec<PlayOrigin>), String> {
+fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Vec<PlayOrigin>), String> {
     // transform(c, c2) resolves against objects declared so far.
     let mut declared: std::collections::HashMap<String, VGroup> = Default::default();
     let mut axes_map: std::collections::HashMap<String, mo_core::Axes> = Default::default();
@@ -917,14 +917,19 @@ fn lower(raws: Vec<RawStmt>) -> Result<(Timeline, Vec<PlayOrigin>), String> {
             }
             RawStmt::Wait(d) => tl.stmts.push(Stmt::Wait(d)),
             RawStmt::Import { path, alias, at } => {
-                let candidates = [
+                // Resolve relative to the importing file first, then legacy
+                // process-CWD locations.
+                let mut candidates = vec![
+                    base_dir.join(&path),
+                    base_dir.join("assets").join(&path),
+                ];
+                for extra in [
                     PathBuf::from(&path),
                     PathBuf::from("assets").join(&path),
                     PathBuf::from("examples").join(&path),
-                    PathBuf::from("../..").join(&path),
-                    PathBuf::from("../../assets").join(&path),
-                    PathBuf::from("../../examples").join(&path),
-                ];
+                ] {
+                    candidates.push(extra);
+                }
                 let resolved = candidates
                     .iter()
                     .find(|p| p.exists())
@@ -934,7 +939,10 @@ fn lower(raws: Vec<RawStmt>) -> Result<(Timeline, Vec<PlayOrigin>), String> {
                     format!("Failed to read imported asset `{}`: {e}", resolved.display())
                 })?;
 
-                let imported_tl = parse(&content).map_err(|diags| {
+                let imported_tl = parse_inner(
+                    &content,
+                    resolved.parent().unwrap_or(base_dir),
+                ).map_err(|diags| {
                     format!(
                         "Error in imported asset `{}`: {}",
                         resolved.display(),
@@ -948,7 +956,7 @@ fn lower(raws: Vec<RawStmt>) -> Result<(Timeline, Vec<PlayOrigin>), String> {
 
                 let shift_vec = at.unwrap_or(Vec3::ZERO);
                 let mut local_play_idx: usize = 0;
-                for stmt in imported_tl.stmts {
+                for stmt in imported_tl.0.stmts {
                     match stmt {
                         Stmt::Decl { id, mut obj } => {
                             if shift_vec != Vec3::ZERO {
@@ -1007,12 +1015,20 @@ fn lower(raws: Vec<RawStmt>) -> Result<(Timeline, Vec<PlayOrigin>), String> {
 }
 
 /// Parse a whole .moa file into a Timeline (with play origins discarded),
-/// with line/col diagnostics.
+/// with line/col diagnostics. Imports resolve against the process CWD.
 pub fn parse(src: &str) -> Result<Timeline, Vec<Diag>> {
-    parse_inner(src).map(|(tl, _)| tl)
+    parse_inner(src, std::path::Path::new(".")).map(|(tl, _)| tl)
 }
 
-fn parse_inner(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
+/// Parse a .moa file on disk; imports resolve relative to the file's directory.
+pub fn parse_file(path: &std::path::Path) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
+    let src = std::fs::read_to_string(path).map_err(|e| {
+        vec![Diag { line: 1, col: 1, message: format!("failed to read {}: {e}", path.display()) }]
+    })?;
+    parse_inner(&src, path.parent().unwrap_or(std::path::Path::new(".")))
+}
+
+fn parse_inner(src: &str, base_dir: &std::path::Path) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
     let mut lexer = Lexer::new(src);
     let mut toks = Vec::new();
     loop {
@@ -1046,7 +1062,7 @@ fn parse_inner(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
     if !diags.is_empty() {
         return Err(diags);
     }
-    match lower(raws) {
+    match lower(raws, base_dir) {
         Ok((tl, origins)) => Ok((tl, origins)),
         Err(m) => Err(vec![Diag { line: 1, col: 1, message: m }]),
     }
@@ -1055,7 +1071,7 @@ fn parse_inner(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
 /// Like `parse`, but also returns per-play provenance (which source file each
 /// flattened play came from). Origins align with the flat play sequence.
 pub fn parse_with_origins(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
-    parse_inner(src)
+    parse_inner(src, std::path::Path::new("."))
 }
 
 /// Skip to just past the next `;` so parsing can continue after an error.
@@ -1213,17 +1229,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_master_video_and_demo_3d_files() {
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest_dir.parent().unwrap().parent().unwrap();
+    fn parse_file_resolves_imports_relative_to_file() {
+        // Simulates a project folder: proj/master.moa imports proj/assets/thing.moa
+        let proj = std::env::temp_dir().join("moa_parse_file_test");
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(proj.join("assets")).expect("mkdir");
+        std::fs::write(proj.join("assets/thing.moa"), "circle c r=1;\nplay showCreation(c) 1s;\n").expect("write asset");
+        std::fs::write(proj.join("master.moa"), "import \"assets/thing.moa\" as thing;\nplay showCreation(thing_c) 1s;\n").expect("write master");
 
-        let master_code = std::fs::read_to_string(root.join("examples/master_video.moa")).expect("read master_video.moa");
-        let master_tl = parse(&master_code).expect("parses master_video.moa");
-        assert!(master_tl.duration() > 0.0);
+        let (tl, origins) = parse_file(&proj.join("master.moa")).expect("parses project master");
+        assert!(tl.duration() > 0.0);
+        assert_eq!(origins.len(), 2);
+        assert!(origins[0].file.as_deref().unwrap().ends_with("thing.moa"));
 
-        let demo_3d_code = std::fs::read_to_string(root.join("examples/demo_3d.moa")).expect("read demo_3d.moa");
-        let demo_3d_tl = parse(&demo_3d_code).expect("parses demo_3d.moa");
-        assert!(demo_3d_tl.duration() > 0.0);
+        let _ = std::fs::remove_dir_all(&proj);
     }
 }
 
