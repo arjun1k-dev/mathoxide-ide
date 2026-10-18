@@ -103,6 +103,18 @@ pub struct Renderer {
     stroke_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
     present_format: wgpu::TextureFormat,
+
+    /// Per-(object, content) GPU buffer + bind group reuse. Without this every
+    /// frame allocated fresh storage/uniform buffers per object — allocation
+    /// churn that overwhelms iGPUs with large static geometry (e.g. dense
+    /// surface3d grids). Content-hashed so animated objects re-upload.
+    buf_cache: std::cell::RefCell<std::collections::HashMap<u64, BufCacheEntry>>,
+}
+
+struct BufCacheEntry {
+    // BindGroups keep their backing buffers alive.
+    data_bg: wgpu::BindGroup,
+    mob_bg: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -228,6 +240,7 @@ impl Renderer {
             stroke_pipeline,
             present_pipeline,
             present_format,
+            buf_cache: std::cell::RefCell::new(Default::default()),
         })
     }
 
@@ -646,41 +659,65 @@ impl Renderer {
         let mut items: Vec<_> = state.iter().collect();
         items.sort_by_key(|(k, _)| *k);
 
-        for (_id, group) in items {
+        for (id, group) in items {
             let (records, num_curves) = prepare_gpu_records(group);
             if num_curves == 0 || records.is_empty() {
                 continue;
             }
 
-            let data_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mob_data"),
-                contents: bytemuck::cast_slice(&records),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            let data_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mob_data_bg"),
-                layout: &self.data_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: data_buf.as_entire_binding(),
-                }],
-            });
+            // Content-hash the geometry so unchanged objects skip allocation
+            // AND upload entirely; animated ones get fresh buffers (old entries
+            // evicted by the size cap below).
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&id, &mut hasher);
+            std::hash::Hash::hash(&records.len(), &mut hasher);
+            use std::hash::Hasher;
+            hasher.write(bytemuck::cast_slice(&records));
+            hasher.write(bytemuck::bytes_of(&mobject_uniforms(group)));
+            let cache_key = hasher.finish();
+
+            let mut cache = self.buf_cache.borrow_mut();
+            let entry = if let Some(hit) = cache.get(&cache_key) {
+                hit
+            } else {
+                if cache.len() > 64 {
+                    cache.clear();
+                }
+                let data_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mob_data"),
+                    contents: bytemuck::cast_slice(&records),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+                let data_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mob_data_bg"),
+                    layout: &self.data_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: data_buf.as_entire_binding(),
+                    }],
+                });
+
+                let mob_u = mobject_uniforms(group);
+                let mob_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mob_uniforms"),
+                    contents: bytemuck::bytes_of(&mob_u),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let mob_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mob_uniforms_bg"),
+                    layout: &self.mob_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: mob_buf.as_entire_binding(),
+                    }],
+                });
+                cache.insert(cache_key, BufCacheEntry { data_bg, mob_bg });
+                cache.get(&cache_key).unwrap()
+            };
+            let data_bg = entry.data_bg.clone();
+            let mob_bg = entry.mob_bg.clone();
 
             let mob_u = mobject_uniforms(group);
-            let mob_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mob_uniforms"),
-                contents: bytemuck::bytes_of(&mob_u),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            let mob_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mob_uniforms_bg"),
-                layout: &self.mob_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: mob_buf.as_entire_binding(),
-                }],
-            });
-
             let has_fill = mob_u.fill_rgba[3] > 0.0 || mob_u.fill_rgba_end[3] > 0.0;
             let has_stroke = records.iter().any(|r| r.stroke_width > 0.0 && r.stroke_rgba[3] > 0.0);
 

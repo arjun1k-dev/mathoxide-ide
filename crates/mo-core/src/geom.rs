@@ -310,13 +310,19 @@ where
 /// 3D Parametric Surface with filled shading: each grid cell is a flat quad
 /// colored by a Viridis height ramp; the wireframe is height-tinted too.
 /// Keeps geometry procedural and buffers lean (iGPU-friendly flat shading).
-pub fn surface_3d_filled<F>(
+///
+/// `wire_stride` decimates the overlay wireframe (draw one line every k cells)
+/// so `res` controls fill smoothness without exploding curve count. A stride
+/// of 1 draws every cell edge; 0 picks an automatic stride that keeps the
+/// wireframe near ~20k curves.
+pub fn surface_3d_filled_with_stride<F>(
     f: F,
     x_range: (f32, f32),
     y_range: (f32, f32),
     resolution: (usize, usize),
     stroke: [f32; 4],
     stroke_width: f32,
+    wire_stride: usize,
 ) -> VGroup
 where
     F: Fn(f32, f32) -> f32,
@@ -366,7 +372,16 @@ where
         }
     }
 
-    // Height-tinted wireframe on top (darkened so the ramp reads through)
+    // Height-tinted wireframe on top (darkened so the ramp reads through).
+    // Strided so dense grids don't multiply curve count: the fill already
+    // carries the shape, the wire only needs to read as a grid.
+    let stride = if wire_stride == 0 {
+        // keep total wire curves near ~20k
+        let cells = (nx - 1).max(ny - 1);
+        ((cells + 149) / 150).max(1)
+    } else {
+        wire_stride.max(1)
+    };
     let wire = |a: Vec3, b: Vec3, g: &mut VGroup| {
         let mut c = ramp(0.5 * (a[2] + b[2]));
         for ch in c.iter_mut().take(3) {
@@ -374,18 +389,33 @@ where
         }
         g.append(line(a, b, c, stroke_width));
     };
-    for j in 0..ny {
-        for i in 0..nx - 1 {
+    for j in (0..ny).step_by(stride) {
+        for i in (0..nx - 1).step_by(stride) {
             wire(at(i, j), at(i + 1, j), &mut g);
         }
     }
-    for i in 0..nx {
-        for j in 0..ny - 1 {
+    for i in (0..nx).step_by(stride) {
+        for j in (0..ny - 1).step_by(stride) {
             wire(at(i, j), at(i, j + 1), &mut g);
         }
     }
     let _ = stroke;
     g
+}
+
+/// `surface_3d_filled` with automatic wireframe decimation (default).
+pub fn surface_3d_filled<F>(
+    f: F,
+    x_range: (f32, f32),
+    y_range: (f32, f32),
+    resolution: (usize, usize),
+    stroke: [f32; 4],
+    stroke_width: f32,
+) -> VGroup
+where
+    F: Fn(f32, f32) -> f32,
+{
+    surface_3d_filled_with_stride(f, x_range, y_range, resolution, stroke, stroke_width, 0)
 }
 
 #[cfg(test)]

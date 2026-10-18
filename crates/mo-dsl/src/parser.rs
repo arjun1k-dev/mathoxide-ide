@@ -793,6 +793,9 @@ fn build_object(
             let xr = get_pair(params, "x").unwrap_or((-3.0, 3.0));
             let yr = get_pair(params, "y").unwrap_or((-3.0, 3.0));
             let res_val = get_f(params, "res").or_else(|| get_f(params, "samples")).unwrap_or(16.0) as usize;
+            // Guard: res is grid samples per axis; beyond this the curve count
+            // (res² cells × ~4 curves) overwhelms an iGPU's per-frame upload.
+            let res_val = res_val.clamp(2, 400);
             let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#58C4DD"));
             let sw = get_f(params, "sw").unwrap_or(1.5);
             let expr = mo_core::expr::Expr::parse(&expr_str)?;
@@ -800,7 +803,8 @@ fn build_object(
                 k == "fill" && matches!(v, Val::Ident(s) if s == "true")
             });
             let mut g = if filled {
-                mo_core::geom::surface_3d_filled(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw)
+                let wire_stride = get_f(params, "wire_stride").unwrap_or(0.0) as usize;
+                mo_core::geom::surface_3d_filled_with_stride(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw, wire_stride)
             } else {
                 mo_core::geom::surface_3d(|x, y| expr.eval_2d(x, y), xr, yr, (res_val, res_val), c, sw)
             };
