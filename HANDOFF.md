@@ -1,11 +1,16 @@
-# MathOxide — Project Handoff Document (2026-10-18, later)
+# MathOxide — Project Handoff Document (2026-10-18, evening)
 
 ## 1. Executive Summary & Status
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM; 16 GB RAM — buffers/lists are fine, VRAM is the constraint).
-* **Build & Test Health**: **65 workspace unit tests pass, zero compiler warnings** (mo-core: 35, mo-dsl: 15, mo-ide: 11, mo-moab: 2, mo-render: 2).
-* This session was a full **IDE & Scripting overhaul**: project-explorer workflow, fixed IDE layout, autocomplete + hover docs, cyberpunk theme, focus management, file-relative imports, comment/hex color separation, high-contrast explorer file selection, stable-ID caret preservation across errors, direct composite asset animations by alias, and top-of-file import placement.
+* **Build & Test Health**: **68 workspace unit tests pass, zero compiler warnings** (mo-core: 35, mo-dsl: 17, mo-ide: 12, mo-moab: 2, mo-render: 2).
+* This session delivered:
+  1. Full **Manim Community (Manim CE) built-in object library**: complete 2D shapes (`arc`, `rounded_rect`, `ellipse`, `regular_polygon`, `triangle`, `annulus`, `sector`, `annular_sector`, `star`, `brace`, `elbow`), 1D lines (`dashed_line`, `tangent_line`, `double_arrow`, `curved_arrow`, `curved_double_arrow`), and 3D primitives (`cylinder`, `cone`, `line3d`, `dot3d`).
+  2. **Coordinate systems & calculus tools**: `number_plane` (grid lines), `complex_plane`, `polar_plane`, `number_line`, `parametric` curves, `riemann` sums (left/right/midpoint), `secant` lines, `area` under curve, `barchart`.
+  3. **Multi-font vector typography & dynamic math**: TrueType font selection (`font="ubuntu"`, `font="mono"`, `font="serif"`, `font="sans"`, or custom `.ttf`/`.otf` path), `decimal` counting mobject, `matrix` formatting (brackets `[`, `(`, `|`).
+  4. **Expanded animation suite**: `drawBorderThenFill`, `uncreate` / `unwrite`, `circumscribe`, `flash`, `scale`, `shift`.
+  5. **IDE & MCP integration**: Autocomplete, hover tooltips, timeline coloring, and syntax highlighting updated for all new primitives.
 
 ---
 
@@ -43,10 +48,14 @@
 
 ---
 
-## 3. What Changed This Session (IDE overhaul)
+## 3. What Changed This Session (IDE overhaul & Manim Built-ins)
 
 | Area | Before | Now |
 |---|---|---|
+| **Manim Built-in Geometry** | Basic circles, rects, lines, arrows | **Complete Manim CE geometric catalog**: `arc`, `rounded_rect` (corner radius `r`), `ellipse`, `regular_polygon` ($n$-sided), `triangle`, `annulus`, `sector`, `annular_sector`, `star`, `brace` ($\underbrace{\quad}$ curly bracket), `elbow` ($\llcorner$), `dashed_line` (dash & space len), `tangent_line`, `double_arrow` ($\longleftrightarrow$), `curved_arrow`, `curved_double_arrow`, `cylinder`, `cone`, `line3d`, `dot3d`. |
+| **Coordinate Systems & Calculus** | Simple axes & basic function plot | **Full coordinate grids & calculus suite**: `number_plane` (grid lines with major/minor steps), `complex_plane` (real/imaginary axes), `polar_plane` (concentric rings & spokes), `number_line` (1D ticks), `parametric` curves ($(x(t), y(t))$), `riemann` sums (`left`, `right`, `mid`), `secant` lines, `area` under curve, `barchart` (discrete data visualization). |
+| **Typography & Fonts** | Single hardcoded font (`UBUNTU_LIGHT`) | **Multi-font vector text engine**: TrueType selection via `font="ubuntu"`, `font="mono"` / `"hack"`, `font="serif"`, `font="sans"` / `"noto"`, or any custom `.ttf`/`.otf` path. Added dynamic `decimal` number display (`places=2`) and native `matrix` formatting (brackets `[`, `(`, or `\|`). |
+| **Animation Classes** | Basic showCreation, fadeIn/Out, transform | **Expanded animation suite**: `drawBorderThenFill` (traces stroke boundary first then floods fill), `uncreate` / `unwrite` (retracts/erases curves), `circumscribe` (animated highlight loop/box), `flash` (radial burst of rays), `scale` (smooth scaling by factor), `shift` (smooth translation). |
 | **Explorer** | Flat asset list in a tab, congested | **Permanent leftmost Explorer column**: active project's `master.moa` on top (click-only), `assets/` always expanded below, click opens, right-click → Open / Insert import / Rename (inline) / Delete (confirm dialog). Loose root .moa in own section. Project dropdown switches active project (opens its master). Auto-rescan every 2s — external (MCP/CLI) changes appear automatically. **Selected file styling**: Bold warm gold (`#FFE066`) on deep royal violet highlight pill; unselected files in soft lavender (`#DDD4F5`), eliminating electric cyan washout. |
 | **Layout** | Tabbed left panel, resizable everything | **Fixed IDE layout**: Explorer (270px) → Editor (430px, h-scrolls, never wraps) → right column (Viewport over Inspector 300px) → Timeline dock (150px). Nothing resizable; app window 1280×800 non-resizable. Scene Tree panel removed. |
 | **Editor** | Plain highlighting | **Autocomplete** (typing any letter pops matching builtins + user symbols — object ids and import aliases scanned live; ↑/↓/Enter/Tab/Esc, click-to-accept, caret lands after insertion), **hover docs** (0.6s stationary on any builtin → signature + description), **cyberpunk theme** (keywords #FF00A8, anims #F5FF00, types #C724FF, ids/easings #00FF9D, strings #00FFF7, numbers #FF6B35, comments #8A2BE2, operators #00D4FF; chrome: panels #0A002B, editor bg #05001A, gutter #4A0099). **Comments & Colors**: Comments strictly use `//` (not `#`); `#` is reserved for hex color literals (`#FFD166` warm gold tokens), preventing lines with `fill: #...` from turning entirely purple. |
@@ -130,6 +139,14 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
 14. **Live Dragging in Master vs Assets**: `apply_shift_to_dsl` supports `import "..." as <alias> [at (x, y)]`. Dragging an imported sub-object (e.g. `exp_title`) while `master.moa` is open identifies the origin asset file via `prefix_` and writes updated coordinates directly to the asset file on disk, immediately recompiling the master composition live.
 15. **Timeline Timings Base Directory**: Always resolve imports with `parse_with_origins_in(&code, &self.compile_base_dir())`. Never call `parse_with_origins` without base dir in IDE workflows, or imports will fail relative to process CWD.
 16. **FileWatcher Dirty Guard**: `reload_from_disk()` must only trigger when `!self.editor_panel.is_dirty` to prevent file system notify jitter from clobbering active user typing.
+17. **Non-Exhaustive Animation Pattern Matching**: When adding any new `Animation` variant to `mo-core`, always update all five consumer sites:
+    - `anim::sample` in `crates/mo-core/src/anim.rs`
+    - `intro_times` and `state_at` match arms in `crates/mo-core/src/scene.rs`
+    - Lowering and imported asset alias-renaming in `crates/mo-dsl/src/parser.rs`
+    - Timeline block labels & color styling in `crates/mo-ide/src/timeline.rs`
+    - JSON-RPC response `anim_label` in `crates/mo-mcp/src/main.rs`
+18. **Multi-Font Zero-Dependency Fallback**: `mo_core::text::get_font_bytes` resolves fonts dynamically (checking system paths for `"serif"` / `"sans"` / custom paths), but always falls back to embedded TrueType byte arrays (`UBUNTU_LIGHT`, `HACK_REGULAR`, `NOTO_EMOJI_REGULAR`). The engine runs with 0 system font dependencies and never crashes when offline or on minimal OS installations.
+19. **DSL Object Declaration Grammar**: MathOxide DSL uses whitespace-delimited `<kind> <id> <param>=<val> ...;` syntax (e.g. `arc a r=2.0 start=0.0 end=3.14;`), NOT `let x = kind(...);`. Object kinds and animation functions are lowercase/camelCase.
 
 ---
 
