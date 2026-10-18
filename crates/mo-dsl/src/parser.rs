@@ -972,6 +972,24 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
 
                 let shift_vec = at.unwrap_or(Vec3::ZERO);
                 let mut local_play_idx: usize = 0;
+
+                // Register the imported asset alias as a first-class composite VGroup
+                // so master files can animate it directly: play showCreation(alias), play transform(alias, to), etc.
+                if let Some(a) = &alias {
+                    let mut composite = VGroup::new();
+                    for stmt in &imported_tl.0.stmts {
+                        if let Stmt::Decl { obj, .. } = stmt {
+                            let mut o = obj.clone();
+                            if shift_vec != Vec3::ZERO {
+                                o.shift(shift_vec);
+                            }
+                            composite.append(o);
+                        }
+                    }
+                    declared.insert(a.clone(), composite.clone());
+                    tl.stmts.push(Stmt::Decl { id: a.clone(), obj: composite });
+                }
+
                 for stmt in imported_tl.0.stmts {
                     match stmt {
                         Stmt::Decl { id, mut obj } => {
@@ -1221,6 +1239,25 @@ mod tests {
         let c = obj.center();
         assert!((c.x - 2.0).abs() < 1e-3);
         assert!((c.y - 3.0).abs() < 1e-3);
+
+        let _ = std::fs::remove_file(asset_file);
+    }
+
+    #[test]
+    fn parses_import_composite_asset_animated_directly() {
+        let temp_dir = std::env::temp_dir();
+        let asset_file = temp_dir.join("test_composite_asset.moa");
+        std::fs::write(&asset_file, "circle c1 at (-1, 0) r=1;\nsquare s1 at (1, 0) side=1;").expect("write temp asset");
+
+        let src = format!(r#"
+            import "{}" as my_pack at (0, 2);
+            play showCreation(my_pack) 1.5s smooth;
+            play fadeOut(my_pack) 1.0s;
+        "#, asset_file.to_str().unwrap());
+
+        let tl = parse(&src).expect("parses direct composite asset animation");
+        assert!(tl.initial_objects().contains_key("my_pack"));
+        assert_eq!(tl.duration(), 2.5);
 
         let _ = std::fs::remove_file(asset_file);
     }

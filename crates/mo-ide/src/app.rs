@@ -386,23 +386,17 @@ impl MathOxideApp {
         self.open_file(target.clone());
         self.asset_panel.rescan();
 
-        // Wire the asset into the project's master automatically.
+        // Wire the asset into the project's master automatically at the top of the file.
         let stem = target.file_stem().unwrap_or_default().to_string_lossy().replace('-', "_");
         let import_line = format!("import \"assets/{stem}.moa\" as {stem};");
         if let Some(master) = self.project_master(&project) {
-            if let Ok(mut code) = std::fs::read_to_string(&master) {
-                if !code.contains(&import_line) {
-                    if !code.ends_with('\n') && !code.is_empty() {
-                        code.push('\n');
-                    }
-                    code.push_str(&import_line);
-                    code.push('\n');
-                    let _ = std::fs::write(&master, &code);
-                    self.asset_panel.new_asset_name.clear();
-                    self.asset_panel.rescan();
-                    self.set_status(format!("Created asset & wired import into {}", master.display()));
-                    return;
-                }
+            if let Ok(code) = std::fs::read_to_string(&master) {
+                let updated = insert_import_at_top(&code, &import_line);
+                let _ = std::fs::write(&master, &updated);
+                self.asset_panel.new_asset_name.clear();
+                self.asset_panel.rescan();
+                self.set_status(format!("Created asset & added import to header in {}", master.display()));
+                return;
             }
         }
         self.asset_panel.new_asset_name.clear();
@@ -693,16 +687,16 @@ impl eframe::App for MathOxideApp {
                         self.open_file(path);
                     }
                     AssetAction::InsertImport { path, alias } => {
-                        let stmt = format!("import \"{path}\" as {alias} at (0, 0);\n");
-                        self.editor_panel.code.push_str(&stmt);
+                        let stmt = format!("import \"{path}\" as {alias} at (0, 0);");
+                        self.editor_panel.code = insert_import_at_top(&self.editor_panel.code, &stmt);
                         let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
-                self.play_origins = origins;
+                        self.play_origins = origins;
                         if let Some(t) = tl {
                             self.timeline = Some(t);
                         }
                         self.editor_panel.set_error(err);
                         self.editor_panel.is_dirty = true;
-                        self.set_status(format!("Imported '{alias}' into scene"));
+                        self.set_status(format!("Imported '{alias}' into scene header"));
                     }
                     AssetAction::NewAsset { name } => {
                         self.new_asset(&name);
@@ -901,21 +895,76 @@ wait 0.5s;
 }
 
 fn new_asset_template() -> String {
-    r#"// MathOxide Component Asset
+    r#"// MathOxide Component Asset — modular scene element
+// Designed around local (0, 0) origin. Master composition imports and animates this asset.
 circle c at (0, 0) r=1.5 fill=#58C4DD33, stroke=cyan, sw=3;
-tex label at (0, -2) text="f(x) = \sin(x)" size=0.8;
-play showCreation(c) 1.5s smooth;
-play fadeIn(label) 1.0s smooth;
-wait 0.5s;
+tex label at (0, -2) text="f(x) = \sin(x)" size=0.8 color=#58C4DD;
 "#.into()
 }
 
 fn new_master_template() -> String {
     r#"// MathOxide Video — master composition
-// Add assets with ➕ New Asset (auto-imports) or ➕ Import in the Videos panel.
-// Each import resolves relative to this file, e.g.:
-//   import "assets/intro.moa" as intro at (0, 0);
+// Imports at the top:
+// import "assets/intro.moa" as intro at (0, 0);
 
+text title text="MathOxide Scene" at (0, 3) size=0.8 color=white;
+play write(title) 1.0s smooth;
 wait 1s;
 "#.into()
+}
+
+/// Insert an import line cleanly at the top of a script:
+/// - After existing imports if present, or
+/// - Below the initial comment/header block.
+pub fn insert_import_at_top(code: &str, import_stmt: &str) -> String {
+    let import_trimmed = import_stmt.trim();
+    if code.lines().any(|l| l.trim() == import_trimmed) {
+        return code.to_string();
+    }
+
+    let mut lines: Vec<&str> = code.lines().collect();
+    let last_import_idx = lines.iter().rposition(|l| l.trim_start().starts_with("import "));
+
+    let insert_pos = if let Some(idx) = last_import_idx {
+        idx + 1
+    } else {
+        // Place below initial comment or whitespace block
+        let mut idx = 0;
+        while idx < lines.len() && (lines[idx].trim_start().starts_with("//") || lines[idx].trim().is_empty()) {
+            idx += 1;
+        }
+        idx
+    };
+
+    lines.insert(insert_pos, import_trimmed);
+    let mut result = lines.join("\n");
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_import_at_top_after_comments() {
+        let code = "// Header\n// Subheader\ntext t at (0,0);\nplay write(t) 1s;\n";
+        let updated = insert_import_at_top(code, "import \"assets/foo.moa\" as foo;");
+        assert_eq!(
+            updated,
+            "// Header\n// Subheader\nimport \"assets/foo.moa\" as foo;\ntext t at (0,0);\nplay write(t) 1s;\n"
+        );
+    }
+
+    #[test]
+    fn test_insert_import_at_top_after_existing_imports() {
+        let code = "import \"assets/a.moa\" as a;\ntext t at (0,0);\n";
+        let updated = insert_import_at_top(code, "import \"assets/b.moa\" as b;");
+        assert_eq!(
+            updated,
+            "import \"assets/a.moa\" as a;\nimport \"assets/b.moa\" as b;\ntext t at (0,0);\n"
+        );
+    }
 }
