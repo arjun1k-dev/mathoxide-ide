@@ -2,6 +2,7 @@
 
 use crate::anim::{self, Animation, TimedAnim};
 use crate::vgroup::VGroup;
+use glam::Vec3;
 use std::collections::HashMap;
 
 /// A timeline statement — what the DSL compiles to. Serializable for .moab.
@@ -91,6 +92,7 @@ impl Player {
                             | Animation::FadeIn { .. }
                             | Animation::Grow { .. }
                             | Animation::SpinInFromNothing { .. }
+                            | Animation::DrawBorderThenFill { .. }
                     ) {
                         intro_times.entry(id).or_insert(time_cur);
                     }
@@ -184,7 +186,7 @@ impl Player {
                                 break;
                             }
                         }
-                        Animation::FadeOut { .. } | Animation::ShrinkToCenter { .. } => {
+                        Animation::FadeOut { .. } | Animation::ShrinkToCenter { .. } | Animation::Uncreate { .. } => {
                             if t >= end {
                                 state.remove(&id);
                             } else {
@@ -205,16 +207,30 @@ impl Player {
                         | Animation::Rotate { .. }
                         | Animation::SpinInFromNothing { .. }
                         | Animation::Indicate { .. }
-                        | Animation::Wiggle { .. } => {
+                        | Animation::Wiggle { .. }
+                        | Animation::DrawBorderThenFill { .. }
+                        | Animation::Circumscribe { .. }
+                        | Animation::Flash { .. }
+                        | Animation::Scale { .. }
+                        | Animation::Shift { .. } => {
                             let target = state.get(&id).cloned().unwrap_or_default();
                             if t >= end {
-                                if matches!(ta.anim, Animation::Rotate { .. }) {
-                                    // rotation ends where it started visually? no — keep rotated
+                                if let Animation::Rotate { angle, .. } = &ta.anim {
                                     let mut m = target.clone();
-                                    if let Animation::Rotate { angle, .. } = &ta.anim {
-                                        let c = m.center();
-                                        m.rotate_z(*angle, c);
+                                    let c = m.center();
+                                    m.rotate_z(*angle, c);
+                                    state.insert(id, m);
+                                } else if let Animation::Scale { factor, .. } = &ta.anim {
+                                    let mut m = target.clone();
+                                    let c = m.center();
+                                    for p in &mut m.points {
+                                        let q = Vec3::from(p.point);
+                                        p.point = (c + (q - c) * factor).to_array();
                                     }
+                                    state.insert(id, m);
+                                } else if let Animation::Shift { delta, .. } = &ta.anim {
+                                    let mut m = target.clone();
+                                    m.shift(*delta);
                                     state.insert(id, m);
                                 } else {
                                     state.insert(id, target);

@@ -472,6 +472,12 @@ fn anim_style(a: &TimedAnim) -> (String, Color32, Color32) {
         mo_core::anim::Animation::ShrinkToCenter { id } => format!("Shrink({})", id),
         mo_core::anim::Animation::Indicate { id, .. } => format!("Indicate({})", id),
         mo_core::anim::Animation::Wiggle { id, .. } => format!("Wiggle({})", id),
+        mo_core::anim::Animation::Uncreate { id } => format!("Uncreate({})", id),
+        mo_core::anim::Animation::DrawBorderThenFill { id } => format!("DrawBorder({})", id),
+        mo_core::anim::Animation::Circumscribe { id, .. } => format!("Circumscribe({})", id),
+        mo_core::anim::Animation::Flash { id, .. } => format!("Flash({})", id),
+        mo_core::anim::Animation::Scale { id, factor } => format!("Scale({}, {:.1}x)", id, factor),
+        mo_core::anim::Animation::Shift { id, delta } => format!("Shift({}, {:.1}, {:.1})", id, delta.x, delta.y),
         mo_core::anim::Animation::CameraOrbit { phi, theta } => {
             format!("Orbit({:.0}\u{b0}, {:.0}\u{b0})", phi.to_degrees(), theta.to_degrees())
         }

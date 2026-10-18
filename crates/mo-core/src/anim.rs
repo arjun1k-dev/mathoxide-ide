@@ -13,6 +13,10 @@ pub enum Animation {
     FadeOut { id: String, shift: Option<Vec3> },
     /// Reveal curves left to right (ShowCreation / Write).
     ShowCreation { id: String },
+    /// Reverse creation: curves retract and disappear
+    Uncreate { id: String },
+    /// Trace border/outline first, then fill interior opacity
+    DrawBorderThenFill { id: String },
     /// Scale from 0 at an anchor point (GrowFromCenter / GrowFromEdge).
     Grow { id: String, anchor: Vec3 },
     Rotate { id: String, angle: f32 },
@@ -20,10 +24,18 @@ pub enum Animation {
     SpinInFromNothing { id: String },
     /// Shrink to center: scales down to 0 at center while fading out
     ShrinkToCenter { id: String },
-    /// Indicate / Flash: pulses slightly larger with a highlight color
+    /// Indicate: pulses slightly larger with a highlight color
     Indicate { id: String, scale_factor: f32, color: Option<[f32; 4]> },
     /// Wiggle: rotates back and forth around center with decaying amplitude
     Wiggle { id: String, angle: f32 },
+    /// Circumscribe: animated loop/box traced around the mobject
+    Circumscribe { id: String, color: Option<[f32; 4]> },
+    /// Flash: radiating lines bursting outward from object center
+    Flash { id: String, line_length: f32, color: Option<[f32; 4]> },
+    /// Scale mobject by factor relative to center
+    Scale { id: String, factor: f32 },
+    /// Move / shift mobject by delta vector
+    Shift { id: String, delta: Vec3 },
     /// Camera orbit to absolute phi/theta tilt+azimuth (radians).
     CameraOrbit { phi: f32, theta: f32 },
     /// Camera zoom by multiplying frame height by 1/factor (factor > 1 = closer).
@@ -39,12 +51,18 @@ impl Animation {
             | Animation::FadeIn { id, .. }
             | Animation::FadeOut { id, .. }
             | Animation::ShowCreation { id, .. }
+            | Animation::Uncreate { id, .. }
+            | Animation::DrawBorderThenFill { id, .. }
             | Animation::Grow { id, .. }
             | Animation::Rotate { id, .. }
             | Animation::SpinInFromNothing { id }
             | Animation::ShrinkToCenter { id }
             | Animation::Indicate { id, .. }
-            | Animation::Wiggle { id, .. } => id,
+            | Animation::Wiggle { id, .. }
+            | Animation::Circumscribe { id, .. }
+            | Animation::Flash { id, .. }
+            | Animation::Scale { id, .. }
+            | Animation::Shift { id, .. } => id,
             Animation::CameraOrbit { .. }
             | Animation::CameraZoom { .. }
             | Animation::CameraMoveTo { .. } => "",
@@ -204,6 +222,77 @@ pub fn sample(anim: &TimedAnim, snapshot: &VGroup, target: &VGroup, t: f32) -> O
             let decay = 1.0 - a;
             let wiggle_angle = *angle * (std::f32::consts::TAU * 3.0 * a).sin() * decay;
             out.rotate_z(wiggle_angle, c);
+            Some(out)
+        }
+        Animation::Uncreate { .. } => {
+            let has_fill = target.points.iter().any(|p| p.fill_rgba[3] > 0.0);
+            let has_stroke = target.points.iter().any(|p| p.stroke_width > 0.0 && p.stroke_rgba[3] > 0.0);
+            if !has_fill && has_stroke {
+                let partial = target.partial(0.0, (1.0 - a).max(0.0));
+                Some(partial)
+            } else {
+                let mut out = target.clone();
+                fade(&mut out, (1.0 - a).max(0.0), false);
+                Some(out)
+            }
+        }
+        Animation::DrawBorderThenFill { .. } => {
+            if a < 0.5 {
+                let s_alpha = (a * 2.0).clamp(0.0, 1.0);
+                let mut partial = target.partial(0.0, s_alpha);
+                for p in &mut partial.points {
+                    p.fill_rgba[3] = 0.0;
+                }
+                Some(partial)
+            } else {
+                let f_alpha = ((a - 0.5) * 2.0).clamp(0.0, 1.0);
+                let mut out = target.clone();
+                for p in &mut out.points {
+                    p.fill_rgba[3] *= f_alpha;
+                }
+                Some(out)
+            }
+        }
+        Animation::Circumscribe { color, .. } => {
+            let mut out = target.clone();
+            let box_color = color.unwrap_or(crate::color::YELLOW);
+            let rect_target = crate::geom::surrounding_rect(target, 0.2, 0.1, [0.0; 4], box_color, 3.0);
+            let trace_start = (a * 1.5 - 0.5).max(0.0);
+            let trace_end = (a * 1.5).min(1.0);
+            let box_anim = rect_target.partial(trace_start, trace_end);
+            out.append(box_anim);
+            Some(out)
+        }
+        Animation::Flash { line_length, color, .. } => {
+            let mut out = target.clone();
+            let c = target.center();
+            let n_lines = 8;
+            let r_inner = 0.2 + a * 0.8;
+            let r_outer = r_inner + line_length * (1.0 - a * 0.5);
+            let f_color = color.unwrap_or(crate::color::YELLOW);
+            let dt = std::f32::consts::TAU / n_lines as f32;
+            for i in 0..n_lines {
+                let angle = dt * i as f32;
+                let dir = Vec3::new(angle.cos(), angle.sin(), 0.0);
+                let mut l = crate::geom::line(c + dir * r_inner, c + dir * r_outer, f_color, 2.5);
+                fade(&mut l, 1.0 - a, false);
+                out.append(l);
+            }
+            Some(out)
+        }
+        Animation::Scale { factor, .. } => {
+            out.interpolate(snapshot, target, 1.0);
+            let c = target.center();
+            let s = 1.0 + (*factor - 1.0) * a;
+            for p in &mut out.points {
+                let q = Vec3::from(p.point);
+                p.point = (c + (q - c) * s).to_array();
+            }
+            Some(out)
+        }
+        Animation::Shift { delta, .. } => {
+            out.interpolate(snapshot, target, 1.0);
+            out.shift(*delta * a);
             Some(out)
         }
     }

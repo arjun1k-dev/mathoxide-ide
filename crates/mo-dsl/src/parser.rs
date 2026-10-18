@@ -613,6 +613,12 @@ fn build_object(
             let r = get_f(params, "r").unwrap_or(0.08);
             mo_core::geom::dot(at, r, dot_color)
         }
+        "arc" => {
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(1.0);
+            let start = get_f(params, "start").or_else(|| get_f(params, "start_angle")).unwrap_or(0.0);
+            let end = get_f(params, "end").or_else(|| get_f(params, "end_angle")).unwrap_or(std::f32::consts::TAU);
+            mo_core::geom::arc(r, start, end, at, fill, stroke, sw)
+        }
         "rect" => mo_core::geom::rect(
             get_f(params, "w").unwrap_or(2.0),
             get_f(params, "h").unwrap_or(1.0),
@@ -621,6 +627,12 @@ fn build_object(
             stroke,
             sw,
         ),
+        "roundedrect" | "rounded_rect" => {
+            let w = get_f(params, "w").unwrap_or(2.0);
+            let h = get_f(params, "h").unwrap_or(1.0);
+            let r = get_f(params, "corner_radius").or_else(|| get_f(params, "r")).unwrap_or(0.3);
+            mo_core::geom::rounded_rect(w, h, r, at, fill, stroke, sw)
+        }
         "square" => {
             let side = get_f(params, "side")
                 .or_else(|| get_f(params, "s"))
@@ -628,24 +640,129 @@ fn build_object(
                 .unwrap_or(2.0);
             mo_core::geom::square(side, at, fill, stroke, sw)
         }
+        "ellipse" => {
+            let rx = get_f(params, "rx").or_else(|| get_f(params, "w").map(|w| w * 0.5)).unwrap_or(1.5);
+            let ry = get_f(params, "ry").or_else(|| get_f(params, "h").map(|h| h * 0.5)).unwrap_or(1.0);
+            mo_core::geom::ellipse(rx, ry, at, fill, stroke, sw)
+        }
+        "regularpolygon" | "regular_polygon" => {
+            let n = get_f(params, "n").or_else(|| get_f(params, "sides")).unwrap_or(5.0) as usize;
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(1.0);
+            mo_core::geom::regular_polygon(n, r, at, fill, stroke, sw)
+        }
+        "triangle" => {
+            let side = get_f(params, "side").or_else(|| get_f(params, "s")).unwrap_or(2.0);
+            mo_core::geom::triangle(side, at, fill, stroke, sw)
+        }
+        "annulus" => {
+            let inner_r = get_f(params, "inner_r").or_else(|| get_f(params, "r_inner")).unwrap_or(1.0);
+            let outer_r = get_f(params, "outer_r").or_else(|| get_f(params, "r_outer")).or_else(|| get_f(params, "r")).unwrap_or(2.0);
+            mo_core::geom::annulus(inner_r, outer_r, at, fill, stroke, sw)
+        }
+        "sector" => {
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(1.5);
+            let start = get_f(params, "start").or_else(|| get_f(params, "start_angle")).unwrap_or(0.0);
+            let end = get_f(params, "end").or_else(|| get_f(params, "end_angle")).or_else(|| get_f(params, "angle")).unwrap_or(std::f32::consts::FRAC_PI_2);
+            mo_core::geom::sector(r, start, end, at, fill, stroke, sw)
+        }
+        "annularsector" | "annular_sector" => {
+            let inner_r = get_f(params, "inner_r").or_else(|| get_f(params, "r_inner")).unwrap_or(1.0);
+            let outer_r = get_f(params, "outer_r").or_else(|| get_f(params, "r_outer")).or_else(|| get_f(params, "r")).unwrap_or(2.0);
+            let start = get_f(params, "start").or_else(|| get_f(params, "start_angle")).unwrap_or(0.0);
+            let end = get_f(params, "end").or_else(|| get_f(params, "end_angle")).unwrap_or(std::f32::consts::FRAC_PI_2);
+            mo_core::geom::annular_sector(inner_r, outer_r, start, end, at, fill, stroke, sw)
+        }
+        "star" => {
+            let n = get_f(params, "n").or_else(|| get_f(params, "points")).unwrap_or(5.0) as usize;
+            let outer_r = get_f(params, "outer_r").or_else(|| get_f(params, "r")).unwrap_or(1.5);
+            let inner_r = get_f(params, "inner_r").unwrap_or(0.6);
+            mo_core::geom::star(n, outer_r, inner_r, at, fill, stroke, sw)
+        }
+        "brace" => {
+            let from = get_v(params, "from").unwrap_or(Vec3::new(-1.5, 0.0, 0.0)) + at;
+            let to = get_v(params, "to").unwrap_or(Vec3::new(1.5, 0.0, 0.0)) + at;
+            let depth = get_f(params, "depth").unwrap_or(0.4);
+            mo_core::geom::brace(from, to, depth, stroke, sw)
+        }
         "line" => mo_core::geom::line(
-            get_v(params, "from").unwrap_or(Vec3::ZERO),
-            get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)),
+            get_v(params, "from").unwrap_or(Vec3::ZERO) + at,
+            get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)) + at,
             stroke,
             sw,
         ),
+        "dashedline" | "dashed_line" => {
+            let from = get_v(params, "from").unwrap_or(Vec3::ZERO) + at;
+            let to = get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)) + at;
+            let dash = get_f(params, "dash").or_else(|| get_f(params, "dash_len")).unwrap_or(0.15);
+            let space = get_f(params, "space").or_else(|| get_f(params, "space_len")).unwrap_or(0.1);
+            mo_core::geom::dashed_line(from, to, dash, space, stroke, sw)
+        }
+        "tangentline" | "tangent_line" => {
+            let angle = get_f(params, "angle").unwrap_or(0.0);
+            let length = get_f(params, "length").or_else(|| get_f(params, "len")).unwrap_or(2.0);
+            mo_core::geom::tangent_line(at, angle, length, stroke, sw)
+        }
         "arrow" => {
             let tip_len = get_f(params, "tip_len").unwrap_or(0.35);
             let tip_w = get_f(params, "tip_w").unwrap_or(0.2);
             let arrow_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(stroke);
             mo_core::geom::arrow(
-                get_v(params, "from").unwrap_or(Vec3::ZERO),
-                get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)),
+                get_v(params, "from").unwrap_or(Vec3::ZERO) + at,
+                get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)) + at,
                 arrow_stroke,
                 sw,
                 tip_len,
                 tip_w,
             )
+        }
+        "doublearrow" | "double_arrow" => {
+            let tip_len = get_f(params, "tip_len").unwrap_or(0.35);
+            let tip_w = get_f(params, "tip_w").unwrap_or(0.2);
+            let arrow_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(stroke);
+            mo_core::geom::double_arrow(
+                get_v(params, "from").unwrap_or(Vec3::ZERO) + at,
+                get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)) + at,
+                arrow_stroke,
+                sw,
+                tip_len,
+                tip_w,
+            )
+        }
+        "curvedarrow" | "curved_arrow" => {
+            let tip_len = get_f(params, "tip_len").unwrap_or(0.35);
+            let tip_w = get_f(params, "tip_w").unwrap_or(0.2);
+            let angle = get_f(params, "angle").unwrap_or(0.5);
+            let arrow_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(stroke);
+            mo_core::geom::curved_arrow(
+                get_v(params, "from").unwrap_or(Vec3::ZERO) + at,
+                get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)) + at,
+                angle,
+                arrow_stroke,
+                sw,
+                tip_len,
+                tip_w,
+            )
+        }
+        "curveddoublearrow" | "curved_double_arrow" => {
+            let tip_len = get_f(params, "tip_len").unwrap_or(0.35);
+            let tip_w = get_f(params, "tip_w").unwrap_or(0.2);
+            let angle = get_f(params, "angle").unwrap_or(0.5);
+            let arrow_stroke = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(stroke);
+            mo_core::geom::curved_double_arrow(
+                get_v(params, "from").unwrap_or(Vec3::ZERO) + at,
+                get_v(params, "to").unwrap_or(Vec3::new(1.0, 0.0, 0.0)) + at,
+                angle,
+                arrow_stroke,
+                sw,
+                tip_len,
+                tip_w,
+            )
+        }
+        "elbow" => {
+            let dir1 = get_v(params, "dir1").unwrap_or(Vec3::X);
+            let dir2 = get_v(params, "dir2").unwrap_or(Vec3::Y);
+            let size = get_f(params, "size").or_else(|| get_f(params, "s")).unwrap_or(0.4);
+            mo_core::geom::elbow(at, dir1, dir2, size, stroke, sw)
         }
         "axes" => {
             let x_range = get_v(params, "x").map(|v| (v.x, v.y, v.z)).unwrap_or((-6.0, 6.0, 1.0));
@@ -658,6 +775,40 @@ fn build_object(
             let vg = axes.to_vgroup(axes_stroke, axes_sw);
             axes_map.insert(name.to_string(), axes);
             vg
+        }
+        "numberplane" | "number_plane" => {
+            let x_range = get_v(params, "x").map(|v| (v.x, v.y, v.z)).unwrap_or((-6.0, 6.0, 1.0));
+            let y_range = get_v(params, "y").map(|v| (v.x, v.y, v.z)).unwrap_or((-3.0, 3.0, 1.0));
+            let width = get_f(params, "w").unwrap_or(10.0);
+            let height = get_f(params, "h").unwrap_or(5.0);
+            let axis_color = get_c(params, "axis_color").unwrap_or(color::WHITE);
+            let grid_color = get_c(params, "grid_color").or_else(|| get_c(params, "stroke")).unwrap_or(color::hex("#334466"));
+            let axes = mo_core::Axes::new(x_range, y_range, width, height, at);
+            axes_map.insert(name.to_string(), axes);
+            mo_core::axes::number_plane(x_range, y_range, width, height, at, axis_color, grid_color, sw, sw * 0.5)
+        }
+        "complexplane" | "complex_plane" => {
+            let r_range = get_v(params, "real").or_else(|| get_v(params, "r")).map(|v| (v.x, v.y, v.z)).unwrap_or((-5.0, 5.0, 1.0));
+            let i_range = get_v(params, "imag").or_else(|| get_v(params, "i")).map(|v| (v.x, v.y, v.z)).unwrap_or((-3.0, 3.0, 1.0));
+            let width = get_f(params, "w").unwrap_or(10.0);
+            let height = get_f(params, "h").unwrap_or(5.0);
+            let axis_color = get_c(params, "axis_color").unwrap_or(color::WHITE);
+            let grid_color = get_c(params, "grid_color").or_else(|| get_c(params, "stroke")).unwrap_or(color::hex("#334466"));
+            let axes = mo_core::Axes::new(r_range, i_range, width, height, at);
+            axes_map.insert(name.to_string(), axes);
+            mo_core::axes::complex_plane(r_range, i_range, width, height, at, axis_color, grid_color, sw, sw * 0.5)
+        }
+        "polarplane" | "polar_plane" => {
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(3.0);
+            let circles = get_f(params, "circles").unwrap_or(4.0) as usize;
+            let spokes = get_f(params, "spokes").unwrap_or(12.0) as usize;
+            mo_core::axes::polar_plane(r, circles, spokes, at, stroke, sw)
+        }
+        "numberline" | "number_line" => {
+            let range = get_v(params, "range").or_else(|| get_v(params, "x")).map(|v| (v.x, v.y, v.z)).unwrap_or((-5.0, 5.0, 1.0));
+            let len = get_f(params, "len").or_else(|| get_f(params, "w")).unwrap_or(8.0);
+            let tick = get_f(params, "tick_size").unwrap_or(0.2);
+            mo_core::axes::number_line(range, len, at, tick, stroke, sw)
         }
         "func" | "plot" | "graph" => {
             let expr_str = get_s(params, "expr")
@@ -681,6 +832,72 @@ fn build_object(
             let plot_sw = get_f(params, "sw").unwrap_or(2.0);
 
             axes.plot_expr(&expr, from_x, to_x, samples, plot_stroke, plot_sw)
+        }
+        "parametric" | "parametric_function" => {
+            let fx_str = get_s(params, "fx").or_else(|| get_s(params, "expr_x")).ok_or_else(|| "parametric requires `fx=\"...\"`".to_string())?;
+            let fy_str = get_s(params, "fy").or_else(|| get_s(params, "expr_y")).ok_or_else(|| "parametric requires `fy=\"...\"`".to_string())?;
+            let expr_x = mo_core::Expr::parse(&fx_str).map_err(|e| format!("parametric fx error: {e}"))?;
+            let expr_y = mo_core::Expr::parse(&fy_str).map_err(|e| format!("parametric fy error: {e}"))?;
+            let axes = match get_s(params, "on") {
+                Some(ax_name) => axes_map.get(&ax_name).ok_or_else(|| format!("axes `{ax_name}` not found"))?.clone(),
+                None => mo_core::Axes::default(),
+            };
+            let from_t = get_f(params, "from").or_else(|| get_f(params, "t_min")).unwrap_or(0.0);
+            let to_t = get_f(params, "to").or_else(|| get_f(params, "t_max")).unwrap_or(std::f32::consts::TAU);
+            let samples = get_f(params, "samples").unwrap_or(120.0) as usize;
+            axes.plot_parametric(|t| expr_x.eval(t), |t| expr_y.eval(t), from_t, to_t, samples, stroke, sw)
+        }
+        "riemann" | "riemann_rectangles" => {
+            let expr_str = get_s(params, "expr").or_else(|| get_s(params, "f")).ok_or_else(|| "riemann requires `expr=\"...\"`".to_string())?;
+            let expr = mo_core::Expr::parse(&expr_str).map_err(|e| format!("riemann expression error: {e}"))?;
+            let axes = match get_s(params, "on") {
+                Some(ax_name) => axes_map.get(&ax_name).ok_or_else(|| format!("axes `{ax_name}` not found"))?.clone(),
+                None => mo_core::Axes::default(),
+            };
+            let from_x = get_f(params, "from").unwrap_or(axes.x_range.0);
+            let to_x = get_f(params, "to").unwrap_or(axes.x_range.1);
+            let n_bars = get_f(params, "n").or_else(|| get_f(params, "bars")).unwrap_or(10.0) as usize;
+            let kind_str = get_s(params, "kind").unwrap_or_else(|| "mid".into());
+            let kind = match kind_str.as_str() {
+                "left" => mo_core::axes::RiemannKind::Left,
+                "right" => mo_core::axes::RiemannKind::Right,
+                _ => mo_core::axes::RiemannKind::Midpoint,
+            };
+            mo_core::axes::riemann_rectangles(&axes, |x| expr.eval(x), from_x, to_x, n_bars, kind, fill, stroke, sw)
+        }
+        "secant" | "secant_line" => {
+            let expr_str = get_s(params, "expr").or_else(|| get_s(params, "f")).ok_or_else(|| "secant requires `expr=\"...\"`".to_string())?;
+            let expr = mo_core::Expr::parse(&expr_str).map_err(|e| format!("secant expression error: {e}"))?;
+            let axes = match get_s(params, "on") {
+                Some(ax_name) => axes_map.get(&ax_name).ok_or_else(|| format!("axes `{ax_name}` not found"))?.clone(),
+                None => mo_core::Axes::default(),
+            };
+            let x1 = get_f(params, "x1").unwrap_or(0.0);
+            let x2 = get_f(params, "x2").unwrap_or(1.0);
+            let len = get_f(params, "len").or_else(|| get_f(params, "length")).unwrap_or(4.0);
+            mo_core::axes::secant_line(&axes, |x| expr.eval(x), x1, x2, len, stroke, sw)
+        }
+        "area" | "integral_area" => {
+            let expr_str = get_s(params, "expr").or_else(|| get_s(params, "f")).ok_or_else(|| "area requires `expr=\"...\"`".to_string())?;
+            let expr = mo_core::Expr::parse(&expr_str).map_err(|e| format!("area expression error: {e}"))?;
+            let axes = match get_s(params, "on") {
+                Some(ax_name) => axes_map.get(&ax_name).ok_or_else(|| format!("axes `{ax_name}` not found"))?.clone(),
+                None => mo_core::Axes::default(),
+            };
+            let from_x = get_f(params, "from").unwrap_or(axes.x_range.0);
+            let to_x = get_f(params, "to").unwrap_or(axes.x_range.1);
+            let samples = get_f(params, "samples").unwrap_or(80.0) as usize;
+            mo_core::axes::area_under_curve(&axes, |x| expr.eval(x), from_x, to_x, samples, fill)
+        }
+        "barchart" | "bar_chart" => {
+            let vals_str = get_s(params, "values").or_else(|| get_s(params, "data")).unwrap_or_else(|| "1, 2, 3, 4".into());
+            let values: Vec<f32> = vals_str
+                .split(',')
+                .filter_map(|s| s.trim().parse::<f32>().ok())
+                .collect();
+            let width = get_f(params, "w").unwrap_or(6.0);
+            let height = get_f(params, "h").unwrap_or(3.0);
+            mo_core::axes::bar_chart(&values, width, height, at, fill, stroke, sw)
         }
         "vector_field" | "vecfield" => {
             let fx_str = get_s(params, "fx").or_else(|| get_s(params, "expr_x")).unwrap_or_else(|| "-y".to_string());
@@ -735,7 +952,30 @@ fn build_object(
             let text_fill = get_c(params, "fill").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
             let text_stroke = get_c(params, "stroke").unwrap_or([0.0; 4]);
             let text_sw = get_f(params, "sw").unwrap_or(0.0);
-            let mut g = mo_core::text::text_styled(&text_str, size, text_fill, text_stroke, text_sw);
+            let font = get_s(params, "font");
+            let mut g = mo_core::text::text_styled_with_font(&text_str, size, font.as_deref(), text_fill, text_stroke, text_sw);
+            g.shift(at);
+            g
+        }
+        "decimal" | "decimal_number" | "decimalnumber" => {
+            let val = get_f(params, "val").or_else(|| get_f(params, "value")).unwrap_or(0.0) as f64;
+            let places = get_f(params, "places").or_else(|| get_f(params, "decimals")).unwrap_or(2.0) as usize;
+            let size = get_f(params, "size").unwrap_or(1.0);
+            let font = get_s(params, "font");
+            let mut g = mo_core::text::decimal_number(val, places, size, font.as_deref(), fill);
+            g.shift(at);
+            g
+        }
+        "matrix" => {
+            let rows_str = get_s(params, "entries").or_else(|| get_s(params, "expr")).unwrap_or_else(|| "1, 0; 0, 1".into());
+            let bracket = get_s(params, "bracket").unwrap_or_else(|| "[".into());
+            let size = get_f(params, "size").unwrap_or(1.0);
+            let font = get_s(params, "font");
+            let rows: Vec<Vec<String>> = rows_str
+                .split(';')
+                .map(|r| r.split(',').map(|c| c.trim().to_string()).collect())
+                .collect();
+            let mut g = mo_core::text::matrix(&rows, size, &bracket, font.as_deref(), fill, stroke, sw);
             g.shift(at);
             g
         }
@@ -788,13 +1028,38 @@ fn build_object(
             let sw = get_f(params, "sw").unwrap_or(2.0);
             mo_core::geom::sphere(radius, at, c, sw)
         }
+        "cylinder" => {
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(1.0);
+            let h = get_f(params, "h").or_else(|| get_f(params, "height")).unwrap_or(2.5);
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let sw = get_f(params, "sw").unwrap_or(2.0);
+            mo_core::geom::cylinder(r, h, at, c, sw)
+        }
+        "cone" => {
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(1.0);
+            let h = get_f(params, "h").or_else(|| get_f(params, "height")).unwrap_or(2.5);
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let sw = get_f(params, "sw").unwrap_or(2.0);
+            mo_core::geom::cone(r, h, at, c, sw)
+        }
+        "line3d" | "line_3d" => {
+            let from = get_v(params, "from").unwrap_or(Vec3::ZERO) + at;
+            let to = get_v(params, "to").unwrap_or(Vec3::new(1.0, 1.0, 1.0)) + at;
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let sw = get_f(params, "sw").unwrap_or(2.0);
+            mo_core::geom::line_3d(from, to, c, sw)
+        }
+        "dot3d" | "dot_3d" => {
+            let r = get_f(params, "r").or_else(|| get_f(params, "radius")).unwrap_or(0.2);
+            let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::WHITE);
+            let sw = get_f(params, "sw").unwrap_or(2.0);
+            mo_core::geom::dot_3d(at, r, c, sw)
+        }
         "surface3d" | "surface" => {
             let expr_str = get_s(params, "expr").or_else(|| get_s(params, "f")).unwrap_or_else(|| "sin(x)*cos(y)".into());
             let xr = get_pair(params, "x").unwrap_or((-3.0, 3.0));
             let yr = get_pair(params, "y").unwrap_or((-3.0, 3.0));
             let res_val = get_f(params, "res").or_else(|| get_f(params, "samples")).unwrap_or(16.0) as usize;
-            // Guard: res is grid samples per axis; beyond this the curve count
-            // (res² cells × ~4 curves) overwhelms an iGPU's per-frame upload.
             let res_val = res_val.clamp(2, 400);
             let c = get_c(params, "stroke").or_else(|| get_c(params, "color")).unwrap_or(color::hex("#58C4DD"));
             let sw = get_f(params, "sw").unwrap_or(1.5);
@@ -893,12 +1158,43 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                     ("shrinkToCenter", [id]) => {
                         Animation::ShrinkToCenter { id: id.clone() }
                     }
-                    ("indicate", [id]) | ("flash", [id]) => {
+                    ("uncreate", [id]) | ("unwrite", [id]) => {
+                        Animation::Uncreate { id: id.clone() }
+                    }
+                    ("drawBorderThenFill", [id]) => {
+                        Animation::DrawBorderThenFill { id: id.clone() }
+                    }
+                    ("circumscribe", [id]) => {
+                        Animation::Circumscribe { id: id.clone(), color: Some(color::YELLOW) }
+                    }
+                    ("indicate", [id]) => {
                         Animation::Indicate {
                             id: id.clone(),
                             scale_factor: 1.25,
                             color: Some(color::YELLOW),
                         }
+                    }
+                    ("flash", [id]) => {
+                        Animation::Flash {
+                            id: id.clone(),
+                            line_length: 0.5,
+                            color: Some(color::YELLOW),
+                        }
+                    }
+                    ("scale", [id, factor_str]) => {
+                        let factor = factor_str.parse::<f32>().unwrap_or(2.0);
+                        Animation::Scale { id: id.clone(), factor }
+                    }
+                    ("scale", [id]) => {
+                        Animation::Scale { id: id.clone(), factor: 2.0 }
+                    }
+                    ("shift", [id, dx_str, dy_str]) => {
+                        let dx = dx_str.parse::<f32>().unwrap_or(1.0);
+                        let dy = dy_str.parse::<f32>().unwrap_or(0.0);
+                        Animation::Shift { id: id.clone(), delta: Vec3::new(dx, dy, 0.0) }
+                    }
+                    ("shift", [id]) => {
+                        Animation::Shift { id: id.clone(), delta: Vec3::new(1.0, 0.0, 0.0) }
                     }
                     ("wiggle", [id]) => {
                         Animation::Wiggle {
@@ -1048,6 +1344,12 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                                     Animation::Rotate { angle, .. } => Animation::Rotate { id: new_id, angle },
                                     Animation::SpinInFromNothing { .. } => Animation::SpinInFromNothing { id: new_id },
                                     Animation::ShrinkToCenter { .. } => Animation::ShrinkToCenter { id: new_id },
+                                    Animation::Uncreate { .. } => Animation::Uncreate { id: new_id },
+                                    Animation::DrawBorderThenFill { .. } => Animation::DrawBorderThenFill { id: new_id },
+                                    Animation::Circumscribe { color, .. } => Animation::Circumscribe { id: new_id, color },
+                                    Animation::Flash { line_length, color, .. } => Animation::Flash { id: new_id, line_length, color },
+                                    Animation::Scale { factor, .. } => Animation::Scale { id: new_id, factor },
+                                    Animation::Shift { delta, .. } => Animation::Shift { id: new_id, delta },
                                     Animation::Indicate { scale_factor, color, .. } => Animation::Indicate { id: new_id, scale_factor, color },
                                     Animation::Wiggle { angle, .. } => Animation::Wiggle { id: new_id, angle },
                                     Animation::Transform { target, .. } => Animation::Transform { id: new_id, target },
@@ -1439,5 +1741,51 @@ play camera.move_to(x=2, y=-1) 1.5s linear;
         assert!(mid.phi > 0.1 && mid.phi < 60.0_f32.to_radians());
         let end = mo_core::scene::Player::camera_at(&tl, 5.0, &base);
         assert!((end.phi - 60.0_f32.to_radians()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_manim_builtins_library() {
+        let src = r#"
+            arc a r=2.0 start=0.0 end=3.14;
+            rounded_rect rr w=3.0 h=1.5 r=0.2;
+            ellipse el rx=2.0 ry=1.0;
+            regular_polygon poly n=6 r=1.5;
+            triangle tri side=2.0;
+            annulus ann inner_r=1.0 outer_r=2.0;
+            sector sec r=2.0 angle=1.57;
+            annular_sector asec inner_r=1.0 outer_r=2.0 angle=1.57;
+            star st n=5 outer_r=2.0 inner_r=0.8;
+            brace br from=(-2.0, 0.0) to=(2.0, 0.0) depth=0.5;
+            dashed_line dl from=(-3.0, 0.0) to=(3.0, 0.0) dash=0.2 space=0.1;
+            tangent_line tl_line at=(0.0, 1.0) angle=0.0 len=2.0;
+            double_arrow darr from=(-2.0, 0.0) to=(2.0, 0.0);
+            curved_arrow carr from=(-2.0, 0.0) to=(2.0, 0.0) angle=0.8;
+            elbow elb at=(0.0, 0.0) size=0.5;
+            number_plane np x=(-4.0, 4.0, 1.0) y=(-3.0, 3.0, 1.0);
+            complex_plane cp real=(-3.0, 3.0, 1.0) imag=(-2.0, 2.0, 1.0);
+            polar_plane pp r=3.0 circles=3 spokes=8;
+            number_line nl range=(-4.0, 4.0, 1.0) len=6.0;
+            parametric pf fx="cos(t)" fy="sin(t)" from=0.0 to=6.28;
+            riemann rm on="np" expr="x^2" from=-2.0 to=2.0 n=8;
+            secant sl on="np" expr="x^2" x1=-1.0 x2=1.0;
+            area ar on="np" expr="sin(x)" from=0.0 to=3.14;
+            barchart bc values="10, 20, 35, 15" w=5.0 h=3.0;
+            cylinder cyl r=1.5 h=3.0;
+            cone cn r=1.5 h=3.0;
+            line3d l3d from=(0.0, 0.0, 0.0) to=(1.0, 2.0, 3.0);
+            dot3d d3d r=0.25;
+            decimal num val=3.14159 places=3 size=1.2 font="mono";
+            matrix mat entries="1, 2; 3, 4" bracket="[";
+            text styled_txt text="MathOxide" size=1.5 font="serif";
+
+            play drawBorderThenFill(a) 1.5s;
+            play circumscribe(rr) 1.0s;
+            play flash(st) 0.8s;
+            play scale(poly, 1.5) 1.0s;
+            play shift(tri, 1.0, 2.0) 1.0s;
+            play uncreate(sec) 1.0s;
+        "#;
+        let tl = parse(src).expect("all manim built-in shapes, graphing, calculus, and anims must parse successfully");
+        assert!(tl.stmts.len() >= 30);
     }
 }

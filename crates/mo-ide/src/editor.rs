@@ -20,15 +20,26 @@ pub fn highlight_moa(ctx: &egui::Context, text: &str) -> egui::text::LayoutJob {
     let keywords = [
         "play", "wait", "at", "from", "to", "r", "w", "h", "fill", "stroke", "sw", "size",
         "on", "expr", "f", "samples", "side", "tip_len", "tip_w", "color", "import", "as",
+        "start", "end", "angle", "dash", "space", "depth", "len", "n", "inner_r", "outer_r",
+        "font", "places", "val", "entries", "bracket", "circles", "spokes", "data", "values",
+        "x1", "x2", "t_min", "t_max", "fx", "fy", "kind", "real", "imag", "wire_stride",
     ];
     let types = [
         "circle", "rect", "line", "text", "tex", "axes", "func", "plot", "graph", "dot", "square", "arrow", "polygon",
-        "axes3d", "cube", "sphere", "surface3d",
+        "axes3d", "cube", "sphere", "surface3d", "surface", "vecfield", "vector_field", "complexgrid", "complex_grid",
+        "arc", "roundedrect", "rounded_rect", "ellipse", "regularpolygon", "regular_polygon", "triangle",
+        "annulus", "sector", "annularsector", "annular_sector", "star", "brace", "dashedline", "dashed_line",
+        "tangentline", "tangent_line", "doublearrow", "double_arrow", "curvedarrow", "curved_arrow",
+        "curveddoublearrow", "curved_double_arrow", "elbow", "numberplane", "number_plane", "complexplane",
+        "complex_plane", "polarplane", "polar_plane", "numberline", "number_line", "parametric",
+        "riemann", "riemann_rectangles", "secant", "secant_line", "area", "barchart", "bar_chart",
+        "cylinder", "cone", "line3d", "line_3d", "dot3d", "dot_3d", "decimal", "decimalnumber", "decimal_number", "matrix",
         "Circle", "Rect", "Line", "Text", "Axes", "Func", "Plot", "Graph", "Dot", "Square", "Arrow", "Polygon",
     ];
     let anims = [
         "showCreation", "write", "fadeIn", "fadeOut", "grow", "growFromCenter", "rotate", "transform", "replacementTransform",
-        "orbit", "zoom", "camera",
+        "orbit", "zoom", "camera", "spinInFromNothing", "shrinkToCenter", "indicate", "wiggle", "flash",
+        "uncreate", "unwrite", "drawBorderThenFill", "circumscribe", "scale", "shift",
         "ShowCreation", "Write", "FadeIn", "FadeOut", "Grow", "GrowFromCenter", "Rotate", "Transform", "ReplacementTransform",
     ];
     let rates = [
