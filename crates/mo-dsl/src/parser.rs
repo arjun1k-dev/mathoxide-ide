@@ -838,6 +838,26 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
     let mut axes_map: std::collections::HashMap<String, mo_core::Axes> = Default::default();
     let mut tl = Timeline { stmts: Vec::new() };
     let mut origins: Vec<PlayOrigin> = Vec::new();
+
+    let mut referenced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for raw in &raws {
+        match raw {
+            RawStmt::Play { args, .. } => {
+                for arg in args {
+                    referenced_ids.insert(arg.clone());
+                }
+            }
+            RawStmt::Decl { params, .. } => {
+                for (_, v) in params {
+                    if let Val::Ident(id) = v {
+                        referenced_ids.insert(id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     for raw in raws {
         match raw {
             RawStmt::Decl { kind, name, params } => {
@@ -973,6 +993,21 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                 let shift_vec = at.unwrap_or(Vec3::ZERO);
                 let mut local_play_idx: usize = 0;
 
+                let has_internal_plays = imported_tl.0.stmts.iter().any(|s| matches!(s, Stmt::Play(_)));
+                let sub_ids_referenced = imported_tl.0.stmts.iter().any(|stmt| {
+                    if let Stmt::Decl { id, .. } = stmt {
+                        let target_name = if let Some(a) = &alias {
+                            format!("{a}_{id}")
+                        } else {
+                            id.clone()
+                        };
+                        referenced_ids.contains(&target_name)
+                    } else {
+                        false
+                    }
+                });
+                let alias_referenced = alias.as_ref().is_some_and(|a| referenced_ids.contains(a));
+
                 // Register the imported asset alias as a first-class composite VGroup
                 // so master files can animate it directly: play showCreation(alias), play transform(alias, to), etc.
                 if let Some(a) = &alias {
@@ -987,7 +1022,9 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                         }
                     }
                     declared.insert(a.clone(), composite.clone());
-                    tl.stmts.push(Stmt::Decl { id: a.clone(), obj: composite });
+                    if alias_referenced || (!sub_ids_referenced && !has_internal_plays) {
+                        tl.stmts.push(Stmt::Decl { id: a.clone(), obj: composite });
+                    }
                 }
 
                 for stmt in imported_tl.0.stmts {
@@ -1002,7 +1039,9 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                                 id.clone()
                             };
                             declared.insert(target_name.clone(), obj.clone());
-                            tl.stmts.push(Stmt::Decl { id: target_name, obj });
+                            if !alias_referenced || sub_ids_referenced {
+                                tl.stmts.push(Stmt::Decl { id: target_name, obj });
+                            }
                         }
                         Stmt::Play(mut anim) => {
                             if shift_vec != Vec3::ZERO {
@@ -1257,7 +1296,17 @@ mod tests {
 
         let tl = parse(&src).expect("parses direct composite asset animation");
         assert!(tl.initial_objects().contains_key("my_pack"));
+        assert!(!tl.initial_objects().contains_key("my_pack_c1"), "sub-objects should not be separate static initial objects when alias is played");
         assert_eq!(tl.duration(), 2.5);
+
+        // At t = 1.5s (end of showCreation), only `my_pack` is visible:
+        let state_mid = mo_core::scene::Player::state_at(&tl, 1.5);
+        assert!(state_mid.contains_key("my_pack"));
+        assert_eq!(state_mid.len(), 1);
+
+        // At t = 2.5s (end of fadeOut), nothing remains visible:
+        let state_end = mo_core::scene::Player::state_at(&tl, 2.5);
+        assert!(state_end.is_empty(), "all objects should be gone after fadeOut");
 
         let _ = std::fs::remove_file(asset_file);
     }
