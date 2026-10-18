@@ -291,13 +291,23 @@ impl AssetPanel {
             if let Some(proj_path) = &active {
                 let project = self.projects.iter().find(|p| &p.path == proj_path);
 
-                // --- master.moa (clickable only) ---
+                // --- master.moa ---
                 if let Some(master) = project.and_then(|p| p.master.clone()) {
                     let is_open = current_file == Some(master.path.as_path());
-                    ui.horizontal(|ui| {
+                    let row = ui.horizontal(|ui| {
                         let btn = ui.selectable_label(is_open, file_label(&master.filename, is_open, false));
                         if btn.clicked() {
                             action = AssetAction::Open(master.path.clone());
+                        }
+                    });
+                    row.response.context_menu(|ui| {
+                        if ui.button("Open").clicked() {
+                            action = AssetAction::Open(master.path.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("🔄 Reload from disk").clicked() {
+                            action = AssetAction::Open(master.path.clone());
+                            ui.close_menu();
                         }
                     });
                 } else {

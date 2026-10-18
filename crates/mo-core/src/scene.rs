@@ -90,6 +90,7 @@ impl Player {
                         Animation::ShowCreation { .. }
                             | Animation::FadeIn { .. }
                             | Animation::Grow { .. }
+                            | Animation::SpinInFromNothing { .. }
                     ) {
                         intro_times.entry(id).or_insert(time_cur);
                     }

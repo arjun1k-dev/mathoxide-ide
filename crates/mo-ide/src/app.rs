@@ -104,8 +104,12 @@ impl MathOxideApp {
             (starter, None, None)
         };
 
+        let compile_base = actual_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .unwrap_or(&asset_panel.project_path);
         let mut editor_panel = EditorPanel::new(code.clone());
-        let (timeline, play_origins, err) = compile_code_in(&code, &asset_panel.project_path);
+        let (timeline, play_origins, err) = compile_code_in(&code, compile_base);
         editor_panel.set_error(err);
 
         let mut app = Self {
@@ -418,9 +422,9 @@ impl eframe::App for MathOxideApp {
             self.fps_timer = now;
         }
 
-        // Poll file watcher for disk changes
+        // Poll file watcher for disk changes (only when editor is not dirty)
         if let Some(watcher) = &mut self.watcher {
-            if watcher.poll_changed() {
+            if watcher.poll_changed() && !self.editor_panel.is_dirty {
                 self.reload_from_disk();
             }
         }
@@ -629,7 +633,7 @@ impl eframe::App for MathOxideApp {
                         self.editor_panel.is_dirty = true;
                     }
                     Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
-                        match mo_dsl::parse_with_origins(&self.editor_panel.code) {
+                        match mo_dsl::parse_with_origins_in(&self.editor_panel.code, &self.compile_base_dir()) {
                             Ok((_, origins))
                                 if origins.len() == run_times.len() =>
                             {
@@ -790,13 +794,54 @@ impl eframe::App for MathOxideApp {
                                 self.editor_panel.code = updated_code;
                                 self.overrides.remove(&id);
                                 let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
-                self.play_origins = origins;
+                                self.play_origins = origins;
                                 if let Some(t) = tl {
                                     self.timeline = Some(t);
                                 }
                                 self.editor_panel.set_error(err);
                                 self.editor_panel.is_dirty = true;
                                 self.set_status(format!("Applied position ({:+.2}, {:+.2}) to code for '{}'", dx, dy, id));
+                            } else {
+                                // Check if `id` is a sub-object from an imported asset: `<alias>_<sub_id>`
+                                let base_dir = self.compile_base_dir();
+                                let mut handled = false;
+                                for line in self.editor_panel.code.lines() {
+                                    let trimmed = line.trim();
+                                    if trimmed.starts_with("import") {
+                                        let words: Vec<&str> = trimmed.split_whitespace().collect();
+                                        if words.len() >= 4 && words[0] == "import" && words[2] == "as" {
+                                            let rel_path = words[1].trim_matches('"');
+                                            let alias = words[3].trim_end_matches(';');
+                                            let prefix = format!("{alias}_");
+                                            if id.starts_with(&prefix) {
+                                                let sub_id = &id[prefix.len()..];
+                                                let asset_file = base_dir.join(rel_path);
+                                                if let Ok(asset_code) = std::fs::read_to_string(&asset_file) {
+                                                    if let Some(new_asset_code) = apply_shift_to_dsl(&asset_code, sub_id, dx, dy) {
+                                                        if std::fs::write(&asset_file, new_asset_code).is_ok() {
+                                                            self.overrides.remove(&id);
+                                                            let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &base_dir);
+                                                            self.play_origins = origins;
+                                                            if let Some(t) = tl {
+                                                                self.timeline = Some(t);
+                                                            }
+                                                            self.editor_panel.set_error(err);
+                                                            self.set_status(format!(
+                                                                "Applied position ({:+.2}, {:+.2}) to asset '{}' ({})",
+                                                                dx, dy, sub_id, asset_file.display()
+                                                            ));
+                                                            handled = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if !handled {
+                                    self.set_status(format!("Could not apply shift to code for '{}'", id));
+                                }
                             }
                         }
                     });
@@ -831,7 +876,13 @@ fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<S
         }
 
         let words: Vec<&str> = trimmed.split_whitespace().collect();
-        if words.len() >= 2 && words[1] == target_id {
+        let is_decl_match = words.len() >= 2 && words[1] == target_id;
+        let is_import_match = words.len() >= 4
+            && words[0] == "import"
+            && words[2] == "as"
+            && words[3].trim_end_matches(';') == target_id;
+
+        if is_decl_match || is_import_match {
             if let Some(at_idx) = line.find("at (") {
                 if let Some(close_idx) = line[at_idx..].find(')') {
                     let full_close = at_idx + close_idx;
@@ -849,6 +900,16 @@ fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<S
                         break;
                     }
                 }
+            } else if is_import_match {
+                let mut new_line = line.clone();
+                if let Some(semi_pos) = new_line.rfind(';') {
+                    new_line.insert_str(semi_pos, &format!(" at ({:.2}, {:.2})", dx, dy));
+                } else {
+                    new_line.push_str(&format!(" at ({:.2}, {:.2});", dx, dy));
+                }
+                *line = new_line;
+                modified = true;
+                break;
             } else if let Some(id_pos) = line.find(target_id) {
                 let insert_pos = id_pos + target_id.len();
                 let new_at = format!(" at ({:.2}, {:.2})", dx, dy);
@@ -966,5 +1027,16 @@ mod tests {
             updated,
             "import \"assets/a.moa\" as a;\nimport \"assets/b.moa\" as b;\ntext t at (0,0);\n"
         );
+    }
+
+    #[test]
+    fn test_apply_shift_to_dsl_updates_import_coordinates() {
+        let code = "import \"assets/intro.moa\" as intro at (0, 0);\nplay showCreation(intro) 1s;\n";
+        let updated = apply_shift_to_dsl(code, "intro", 1.5, -2.0).expect("applies shift");
+        assert!(updated.contains("import \"assets/intro.moa\" as intro at (1.50, -2.00);"));
+
+        let code_without_at = "import \"assets/intro.moa\" as intro;\nplay showCreation(intro) 1s;\n";
+        let updated2 = apply_shift_to_dsl(code_without_at, "intro", 0.5, 3.2).expect("applies shift");
+        assert!(updated2.contains("import \"assets/intro.moa\" as intro at (0.50, 3.20);"));
     }
 }

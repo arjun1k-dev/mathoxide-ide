@@ -126,6 +126,10 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
 10. **Panel scans**: keep the 2s auto-rescan in `AssetPanel::show`; never trust a stale cache after external writes.
 11. **Focus contract**: editor reclaims focus only when *no* widget holds it (so inline rename / new-asset fields still work); global single-key shortcuts must check `editor_panel.focus_held`.
 12. **Animated vs interactive camera** — viewport keeps a base camera; `camera_at` overrides during/after keyframed anims.
+13. **Imported Asset Isolation**: Unplayed imported assets or sub-objects must NEVER be emitted as scene `Stmt::Decl`s; only alias-referenced composites or referenced sub-objects are lowered to `tl.stmts`. This prevents unplayed assets from appearing and freezing at $t = 0$.
+14. **Live Dragging in Master vs Assets**: `apply_shift_to_dsl` supports `import "..." as <alias> [at (x, y)]`. Dragging an imported sub-object (e.g. `exp_title`) while `master.moa` is open identifies the origin asset file via `prefix_` and writes updated coordinates directly to the asset file on disk, immediately recompiling the master composition live.
+15. **Timeline Timings Base Directory**: Always resolve imports with `parse_with_origins_in(&code, &self.compile_base_dir())`. Never call `parse_with_origins` without base dir in IDE workflows, or imports will fail relative to process CWD.
+16. **FileWatcher Dirty Guard**: `reload_from_disk()` must only trigger when `!self.editor_panel.is_dirty` to prevent file system notify jitter from clobbering active user typing.
 
 ---
 

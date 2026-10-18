@@ -994,18 +994,6 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                 let mut local_play_idx: usize = 0;
 
                 let has_internal_plays = imported_tl.0.stmts.iter().any(|s| matches!(s, Stmt::Play(_)));
-                let sub_ids_referenced = imported_tl.0.stmts.iter().any(|stmt| {
-                    if let Stmt::Decl { id, .. } = stmt {
-                        let target_name = if let Some(a) = &alias {
-                            format!("{a}_{id}")
-                        } else {
-                            id.clone()
-                        };
-                        referenced_ids.contains(&target_name)
-                    } else {
-                        false
-                    }
-                });
                 let alias_referenced = alias.as_ref().is_some_and(|a| referenced_ids.contains(a));
 
                 // Register the imported asset alias as a first-class composite VGroup
@@ -1022,7 +1010,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                         }
                     }
                     declared.insert(a.clone(), composite.clone());
-                    if alias_referenced || (!sub_ids_referenced && !has_internal_plays) {
+                    if alias_referenced {
                         tl.stmts.push(Stmt::Decl { id: a.clone(), obj: composite });
                     }
                 }
@@ -1039,7 +1027,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                                 id.clone()
                             };
                             declared.insert(target_name.clone(), obj.clone());
-                            if !alias_referenced || sub_ids_referenced {
+                            if (!alias_referenced && referenced_ids.contains(&target_name)) || has_internal_plays {
                                 tl.stmts.push(Stmt::Decl { id: target_name, obj });
                             }
                         }
@@ -1352,6 +1340,45 @@ mod tests {
         assert!(tl.duration() > 0.0);
         assert_eq!(origins.len(), 2);
         assert!(origins[0].file.as_deref().unwrap().ends_with("thing.moa"));
+
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    #[test]
+    fn unplayed_imported_assets_do_not_appear_at_t0_or_freeze() {
+        let proj = std::env::temp_dir().join("moa_unplayed_assets_test");
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(proj.join("assets")).expect("mkdir");
+        std::fs::write(proj.join("assets/scene1.moa"), "circle c1 r=1;\n").expect("write scene1");
+        std::fs::write(proj.join("assets/scene2.moa"), "square s2 side=2;\n").expect("write scene2");
+        std::fs::write(proj.join("assets/scene3.moa"), "text t3 text=\"hi\";\n").expect("write scene3");
+
+        // master imports scene1, scene2, scene3, but ONLY plays scene1 at t=0 and scene2 at t=4:
+        let master_src = r#"
+            import "assets/scene1.moa" as s1 at (0, 0);
+            import "assets/scene2.moa" as s2 at (0, 0);
+            import "assets/scene3.moa" as s3 at (0, 0);
+            play showCreation(s1) 2s;
+            wait 2s;
+            play showCreation(s2) 2s;
+        "#;
+        std::fs::write(proj.join("master.moa"), master_src).expect("write master");
+
+        let (tl, _) = parse_file(&proj.join("master.moa")).expect("parses master");
+
+        // At t = 0s, only s1 is playing/visible. Neither s2 nor unplayed s3 should appear!
+        let state_t0 = mo_core::scene::Player::state_at(&tl, 0.0);
+        assert!(state_t0.contains_key("s1"), "s1 should be visible at t=0");
+        assert!(!state_t0.contains_key("s2"), "s2 should NOT appear at t=0");
+        assert!(!state_t0.contains_key("s3"), "unplayed s3 should NEVER appear at t=0");
+        assert!(!state_t0.contains_key("s1_c1"), "sub-objects should not be duplicated when alias is played");
+        assert!(!state_t0.contains_key("s2_s2"), "sub-objects of s2 should not appear at t=0");
+        assert!(!state_t0.contains_key("s3_t3"), "sub-objects of unplayed s3 should not appear");
+
+        // At t = 4s, s2 starts and is visible:
+        let state_t4 = mo_core::scene::Player::state_at(&tl, 4.0);
+        assert!(state_t4.contains_key("s2"), "s2 should be visible at t=4");
+        assert!(!state_t4.contains_key("s3"), "unplayed s3 must still NOT appear");
 
         let _ = std::fs::remove_dir_all(&proj);
     }
