@@ -4,8 +4,8 @@
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM; 16 GB RAM — buffers/lists are fine, VRAM is the constraint).
-* **Build & Test Health**: **61 workspace unit tests pass, zero compiler warnings** (mo-ide now 9 incl. rescan grouping + prefix-span regression test).
-* This session was a full **IDE overhaul**: project-explorer workflow, fixed IDE layout, autocomplete + hover docs, cyberpunk theme, focus management, and a file-relative import fix in the editor path.
+* **Build & Test Health**: **62 workspace unit tests pass, zero compiler warnings** (mo-ide now 10 incl. caret preservation across error bar appearing/disappearing).
+* This session was a full **IDE overhaul**: project-explorer workflow, fixed IDE layout, autocomplete + hover docs, cyberpunk theme, focus management, file-relative imports, comment/hex color separation, high-contrast explorer file selection, and stable-ID caret preservation across errors.
 
 ---
 
@@ -31,7 +31,7 @@
 | **Layout** | Tabbed left panel, resizable everything | **Fixed IDE layout**: Explorer (270px) → Editor (430px, h-scrolls, never wraps) → right column (Viewport over Inspector 300px) → Timeline dock (150px). Nothing resizable; app window 1280×800 non-resizable. Scene Tree panel removed. |
 | **Editor** | Plain highlighting | **Autocomplete** (typing any letter pops matching builtins + user symbols — object ids and import aliases scanned live; ↑/↓/Enter/Tab/Esc, click-to-accept, caret lands after insertion), **hover docs** (0.6s stationary on any builtin → signature + description), **cyberpunk theme** (keywords #FF00A8, anims #F5FF00, types #C724FF, ids/easings #00FF9D, strings #00FFF7, numbers #FF6B35, comments #8A2BE2, operators #00D4FF; chrome: panels #0A002B, editor bg #05001A, gutter #4A0099). **Comments & Colors**: Comments strictly use `//` (not `#`); `#` is reserved for hex color literals (`#FFD166` warm gold tokens), preventing lines with `fill: #...` from turning entirely purple. |
 | **Build & Cache** | Target cache ballooned to 24.5 GB from debug symbols | Reclaimed 24.5 GB via `cargo clean`. Added `[profile.dev] debug = 1` to `Cargo.toml` to suppress multi-gigabyte DWARF inspection tables while preserving accurate line-number stack traces. |
-| **Focus** | Caret lost on error-bar layout shift; Space/arrows/R hijacked typing | Editor **claims free keyboard focus every frame** (`EditorPanel::focus_held`); global playback/camera shortcuts gated on `!focus_held`. Ctrl+S/O/N still global. |
+| **Focus & Caret** | Caret launched to EOF on errors due to ID shifts and focus reclaim | **Stable ID Scope & Caret Preservation**: Wrapped editor inside `ui.push_id("code_editor_fixed_scope")` with `id_salt("editor_scroll_area")` and `id_salt("code_editor_text_edit")`. The error bar appearing/disappearing no longer shifts TextEdit's ID. Added `EditorPanel::last_caret_char`; if egui tries to default caret to end-of-text on `request_focus()` / `gained_focus()`, the known caret is restored immediately. |
 | **Imports in IDE** | `parse_with_origins` used CWD → `Could not find imported asset` | New `mo_dsl::parse_with_origins_in(src, base_dir)`; IDE compiles with the open file's folder (`compile_base_dir()`), falling back to active project then src_home. |
 | **New Asset** | Auto-named `asset_N.moa`, orphaned into src_home with no project | Named inline (➕ by `assets/` or right-click header), created in **active project** only; auto-imports into its master.moa. No src_home fallback. |
 

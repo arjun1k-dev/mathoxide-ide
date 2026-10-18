@@ -168,6 +168,8 @@ pub struct EditorPanel {
     hover_point: Option<(egui::Pos2, std::time::Instant)>,
     /// True while the code text edit holds keyboard focus this frame.
     pub focus_held: bool,
+    /// Last known caret character index, preserved across errors and focus reclaims.
+    pub last_caret_char: usize,
 }
 
 impl EditorPanel {
@@ -184,6 +186,7 @@ impl EditorPanel {
             comp_selected: 0,
             hover_point: None,
             focus_held: false,
+            last_caret_char: 0,
         }
     }
 
@@ -264,78 +267,96 @@ impl EditorPanel {
             accept_selection = enter || tab;
         }
 
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Line numbers gutter
-                    ui.allocate_ui(egui::vec2(gutter_width, ui.available_height()), |ui| {
-                        let mut line_num_str = String::new();
-                        for l in 1..=total_lines {
-                            line_num_str.push_str(&format!("{:>4}\n", l));
-                        }
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(line_num_str)
-                                    .monospace()
-                                    .color(Color32::from_rgb(0x4A, 0x00, 0x99))
-                                    .size(13.0),
-                            )
-                            .selectable(false),
+        ui.push_id("code_editor_fixed_scope", |ui| {
+            egui::ScrollArea::both()
+                .id_salt("editor_scroll_area")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Line numbers gutter
+                        ui.allocate_ui(egui::vec2(gutter_width, ui.available_height()), |ui| {
+                            let mut line_num_str = String::new();
+                            for l in 1..=total_lines {
+                                line_num_str.push_str(&format!("{:>4}\n", l));
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(line_num_str)
+                                        .monospace()
+                                        .color(Color32::from_rgb(0x4A, 0x00, 0x99))
+                                        .size(13.0),
+                                )
+                                .selectable(false),
+                            );
+                        });
+
+                        ui.separator();
+
+                        // Code text edit with custom syntax highlighting
+                        let mut layouter = |ui: &egui::Ui, text: &str, _wrap_width: f32| {
+                            let job = highlight_moa(ui.ctx(), text);
+                            ui.fonts(|f| f.layout_job(job))
+                        };
+
+                        // Fixed wide text area — panel narrower than the code
+                        // h-scrolls instead of wrapping.
+                        let width = ui.available_width().max(700.0);
+                        let height = ui.available_height().max(400.0);
+                        let response = ui.add_sized(
+                            [width, height],
+                            egui::TextEdit::multiline(&mut self.code)
+                                .id_salt("code_editor_text_edit")
+                                .font(FontId::monospace(13.0))
+                                .code_editor()
+                                .background_color(Color32::from_rgb(0x05, 0x00, 0x1A))
+                                .lock_focus(true)
+                                .desired_width(width)
+                                .layouter(&mut layouter),
                         );
-                    });
 
-                    ui.separator();
+                        if response.changed() {
+                            self.is_dirty = true;
+                            text_changed = true;
+                        }
 
-                    // Code text edit with custom syntax highlighting
-                    let mut layouter = |ui: &egui::Ui, text: &str, _wrap_width: f32| {
-                        let job = highlight_moa(ui.ctx(), text);
-                        ui.fonts(|f| f.layout_job(job))
-                    };
+                        // Keyboard focus sticks to the editor: reclaim it whenever
+                        // no other widget holds it (e.g. after a stray click).
+                        let nothing_focused = ui.memory(|m| m.focused().is_none());
+                        if !response.has_focus() && nothing_focused {
+                            response.request_focus();
+                        }
+                        self.focus_held = response.has_focus();
 
-                    // Fixed wide text area — panel narrower than the code
-                    // h-scrolls instead of wrapping.
-                    let width = ui.available_width().max(700.0);
-                    let height = ui.available_height().max(400.0);
-                    let response = ui.add_sized(
-                        [width, height],
-                        egui::TextEdit::multiline(&mut self.code)
-                            .font(FontId::monospace(13.0))
-                            .code_editor()
-                            .background_color(Color32::from_rgb(0x05, 0x00, 0x1A))
-                            .lock_focus(true)
-                            .desired_width(width)
-                            .layouter(&mut layouter),
-                    );
+                        // Caret tracking: egui's default behavior on gaining focus (or layout shifts)
+                        // is to launch caret to end of text. Detect this and restore our preserved last_caret_char.
+                        let mut text_edit_state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), response.id);
+                        let text_char_len = self.code.chars().count();
+                        let caret_char = text_edit_state
+                            .as_ref()
+                            .and_then(|st| st.cursor.char_range())
+                            .map(|r| r.primary.index)
+                            .unwrap_or(self.last_caret_char);
 
-                    if response.changed() {
-                        self.is_dirty = true;
-                        text_changed = true;
-                    }
+                        if response.has_focus() {
+                            if response.gained_focus() && self.last_caret_char < text_char_len && caret_char == text_char_len {
+                                if let Some(mut st) = text_edit_state.take() {
+                                    let c = egui::text::CCursor::new(self.last_caret_char);
+                                    st.cursor.set_char_range(Some(egui::text_selection::CCursorRange { primary: c, secondary: c }));
+                                    st.store(ui.ctx(), response.id);
+                                }
+                            } else {
+                                self.last_caret_char = caret_char;
+                            }
+                        }
 
-                    // Keyboard focus sticks to the editor: reclaim it whenever
-                    // no other widget holds it (e.g. after layout shifts from
-                    // the error bar appearing, or a stray click).
-                    let nothing_focused = ui.memory(|m| m.focused().is_none());
-                    if !response.has_focus() && nothing_focused {
-                        response.request_focus();
-                    }
-                    self.focus_held = response.has_focus();
+                        let font_id = FontId::monospace(13.0);
+                        let line_h = ui.fonts(|f| f.row_height(&font_id)).max(15.0);
+                        let char_w = ui.fonts(|f| {
+                            let galley = f.layout_no_wrap("0".to_string(), font_id.clone(), Color32::WHITE);
+                            galley.size().x.max(1.0)
+                        });
 
-                    // ---- Autocomplete ----
-                    let font_id = FontId::monospace(13.0);
-                    let line_h = ui.fonts(|f| f.row_height(&font_id)).max(15.0);
-                    let char_w = ui.fonts(|f| {
-                        let galley = f.layout_no_wrap("0".to_string(), font_id.clone(), Color32::WHITE);
-                        galley.size().x.max(1.0)
-                    });
-
-                    let caret_char = egui::widgets::text_edit::TextEditState::load(ui.ctx(), response.id)
-                        .and_then(|st| st.cursor.char_range())
-                        .map(|r| r.primary.index)
-                        .unwrap_or(0);
-
-                    if response.changed() {
+                        if response.changed() {
                         // Recompute the completion list for the word being typed.
                         let (start, prefix) = crate::completion::prefix_before_caret(&self.code, caret_char);
                         let items: Vec<_> = crate::completion::all_completions(&self.code)
@@ -371,6 +392,7 @@ impl EditorPanel {
                             self.is_dirty = true;
                             // Put the caret after the inserted text.
                             let new_idx = self.code[..end + c.insert.len()].chars().count();
+                            self.last_caret_char = new_idx;
                             if let Some(mut st) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), response.id) {
                                 let c = egui::text::CCursor::new(new_idx);
                                 st.cursor.set_char_range(Some(egui::text_selection::CCursorRange { primary: c, secondary: c }));
@@ -436,6 +458,7 @@ impl EditorPanel {
                                 text_changed = true;
                                 self.is_dirty = true;
                                 let new_idx = self.code[..end + c.insert.len()].chars().count();
+                                self.last_caret_char = new_idx;
                                 if let Some(mut st) = egui::widgets::text_edit::TextEditState::load(ui.ctx(), response.id) {
                                     let c = egui::text::CCursor::new(new_idx);
                                     st.cursor.set_char_range(Some(egui::text_selection::CCursorRange { primary: c, secondary: c }));
@@ -494,6 +517,7 @@ impl EditorPanel {
                     }
                 });
             });
+        });
 
         (text_changed, save_requested)
     }
@@ -554,6 +578,20 @@ play showCreation(c) 2s smooth;
         editor.set_error(None);
         assert!(editor.error_line.is_none());
         assert!(editor.parse_error.is_none());
+    }
+
+    #[test]
+    fn test_caret_preserved_when_error_set() {
+        let mut editor = EditorPanel::new("circle c at (0, 0);\nplay showCreation(c) 2s;".into());
+        editor.last_caret_char = 12; // Middle of first line
+
+        // Simulating error setting
+        editor.set_error(Some("1:10: syntax error".into()));
+        assert_eq!(editor.last_caret_char, 12, "Caret must not be modified when error is set");
+
+        // Simulating error cleared
+        editor.set_error(None);
+        assert_eq!(editor.last_caret_char, 12, "Caret must not be modified when error is cleared");
     }
 }
 
