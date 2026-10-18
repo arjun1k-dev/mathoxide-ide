@@ -230,6 +230,18 @@ impl AssetPanel {
             self.rescan();
         }
 
+        let file_label = |filename: &str, is_open: bool, indent: bool| {
+            let prefix = if indent { "  📄 " } else { "📄 " };
+            if is_open {
+                RichText::new(format!("{prefix}{filename}"))
+                    .color(Color32::from_rgb(0xFF, 0xE0, 0x66)) // Warm gold / high contrast
+                    .strong()
+            } else {
+                RichText::new(format!("{prefix}{filename}"))
+                    .color(Color32::from_rgb(0xDD, 0xD4, 0xF5)) // Soft lavender
+            }
+        };
+
         ui.horizontal(|ui| {
             ui.heading("Explorer");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -283,7 +295,7 @@ impl AssetPanel {
                 if let Some(master) = project.and_then(|p| p.master.clone()) {
                     let is_open = current_file == Some(master.path.as_path());
                     ui.horizontal(|ui| {
-                        let btn = ui.selectable_label(is_open, format!("📄 {}", master.filename));
+                        let btn = ui.selectable_label(is_open, file_label(&master.filename, is_open, false));
                         if btn.clicked() {
                             action = AssetAction::Open(master.path.clone());
                         }
@@ -388,7 +400,7 @@ impl AssetPanel {
 
                         let is_open = current_file == Some(entry.path.as_path());
                         let row = ui.horizontal(|ui| {
-                            let btn = ui.selectable_label(is_open, format!("  📄 {}", entry.filename));
+                            let btn = ui.selectable_label(is_open, file_label(&entry.filename, is_open, true));
                             if btn.clicked() {
                                 action = AssetAction::Open(entry.path.clone());
                             }
@@ -426,7 +438,7 @@ impl AssetPanel {
                     ui.indent(format!("loose-{}", entry.path.display()), |ui| {
                         let is_open = current_file == Some(entry.path.as_path());
                         let row = ui.horizontal(|ui| {
-                            let btn = ui.selectable_label(is_open, format!("📄 {}", entry.filename));
+                            let btn = ui.selectable_label(is_open, file_label(&entry.filename, is_open, false));
                             if btn.clicked() {
                                 action = AssetAction::Open(entry.path.clone());
                             }

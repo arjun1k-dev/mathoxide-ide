@@ -12,13 +12,14 @@ pub fn highlight_moa(ctx: &egui::Context, text: &str) -> egui::text::LayoutJob {
     let color_anim = Color32::from_rgb(0xF5, 0xFF, 0x00);      // #F5FF00 acid yellow (functions/anims)
     let color_rate = Color32::from_rgb(0x00, 0xFF, 0x9D);      // #00FF9D neon green (easings)
     let color_string = Color32::from_rgb(0x00, 0xFF, 0xF7);    // #00FFF7 electric cyan
+    let color_hex = Color32::from_rgb(0xFF, 0xD1, 0x66);       // #FFD166 warm amber gold (hex colors)
     let color_number = Color32::from_rgb(0xFF, 0x6B, 0x35);    // #FF6B35 neon orange
     let color_comment = Color32::from_rgb(0x8A, 0x2B, 0xE2);   // #8A2BE2 bright violet
     let color_operator = Color32::from_rgb(0x00, 0xD4, 0xFF);  // #00D4FF deep cyan
 
     let keywords = [
         "play", "wait", "at", "from", "to", "r", "w", "h", "fill", "stroke", "sw", "size",
-        "on", "expr", "f", "samples", "side", "tip_len", "tip_w", "color",
+        "on", "expr", "f", "samples", "side", "tip_len", "tip_w", "color", "import", "as",
     ];
     let types = [
         "circle", "rect", "line", "text", "tex", "axes", "func", "plot", "graph", "dot", "square", "arrow", "polygon",
@@ -43,8 +44,8 @@ pub fn highlight_moa(ctx: &egui::Context, text: &str) -> egui::text::LayoutJob {
     while i < n {
         let ch = chars[i];
 
-        // Comments (// ... or # ...)
-        if (ch == '/' && i + 1 < n && chars[i + 1] == '/') || ch == '#' {
+        // Comments (// ...)
+        if ch == '/' && i + 1 < n && chars[i + 1] == '/' {
             let start = i;
             while i < n && chars[i] != '\n' {
                 i += 1;
@@ -68,7 +69,7 @@ pub fn highlight_moa(ctx: &egui::Context, text: &str) -> egui::text::LayoutJob {
             let s: String = chars[start..i].iter().collect();
             job.append(&s, 0.0, TextFormat {
                 font_id: font_id.clone(),
-                color: color_string,
+                color: color_hex,
                 ..Default::default()
             });
             continue;
@@ -513,6 +514,33 @@ play showCreation(c) 2s smooth;
         let job = highlight_moa(&ctx, code);
         assert!(!job.sections.is_empty());
         assert_eq!(job.text, code);
+
+        // Verify that // is recognized as comment
+        let comment_section = job.sections.iter().find(|s| {
+            let start = s.byte_range.start;
+            let end = s.byte_range.end;
+            &job.text[start..end] == "// Demo comment"
+        });
+        assert!(comment_section.is_some(), "Expected '// Demo comment' section");
+        assert_eq!(comment_section.unwrap().format.color, Color32::from_rgb(0x8A, 0x2B, 0xE2));
+
+        // Verify that #58C4DD33 is recognized as hex color, NOT comment
+        let hex_section = job.sections.iter().find(|s| {
+            let start = s.byte_range.start;
+            let end = s.byte_range.end;
+            &job.text[start..end] == "#58C4DD33"
+        });
+        assert!(hex_section.is_some(), "Expected '#58C4DD33' hex section");
+        assert_eq!(hex_section.unwrap().format.color, Color32::from_rgb(0xFF, 0xD1, 0x66));
+
+        // Verify that stroke following #58C4DD33 is recognized as keyword
+        let stroke_section = job.sections.iter().find(|s| {
+            let start = s.byte_range.start;
+            let end = s.byte_range.end;
+            &job.text[start..end] == "stroke"
+        });
+        assert!(stroke_section.is_some(), "Expected 'stroke' keyword section");
+        assert_eq!(stroke_section.unwrap().format.color, Color32::from_rgb(0xFF, 0x00, 0xA8));
     }
 
     #[test]

@@ -73,8 +73,8 @@ impl MathOxideApp {
             v.window_fill = Color32::from_rgb(0x0A, 0x00, 0x2B);
             v.extreme_bg_color = Color32::from_rgb(0x05, 0x00, 0x1A);  // text fields, deepest
             v.faint_bg_color = Color32::from_rgb(0x15, 0x00, 0x33);    // stripes / active-line tint
-            v.selection.bg_fill = Color32::from_rgba_premultiplied(0x00, 0xFF, 0xF7, 60);
-            v.selection.stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(0x00, 0xFF, 0xF7));
+            v.selection.bg_fill = Color32::from_rgba_premultiplied(0x4A, 0x00, 0x88, 120); // deep royal violet
+            v.selection.stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(0xFF, 0xE0, 0x66)); // warm gold
             let theme_widget = |w: &mut egui::style::WidgetVisuals| {
                 w.bg_fill = Color32::from_rgb(0x15, 0x00, 0x33);
                 w.weak_bg_fill = Color32::from_rgb(0x0F, 0x00, 0x28);
@@ -594,7 +594,7 @@ impl eframe::App for MathOxideApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some((msg, created)) = &self.status_message {
                         if now.duration_since(*created).as_secs_f32() < 4.5 {
-                            ui.colored_label(Color32::from_rgb(0x00, 0xFF, 0xF7), msg);
+                            ui.colored_label(Color32::from_rgb(0x00, 0xFF, 0x9D), msg);
                         }
                     }
                     ui.separator();

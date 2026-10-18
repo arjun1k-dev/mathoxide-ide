@@ -52,6 +52,9 @@ mo-render = { path = "crates/mo-render" }
 mo-dsl = { path = "crates/mo-dsl" }
 mo-moab = { path = "crates/mo-moab" }
 
+[profile.dev]
+debug = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
