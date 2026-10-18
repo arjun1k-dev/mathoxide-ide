@@ -1090,6 +1090,15 @@ pub fn parse_with_origins(src: &str) -> Result<(Timeline, Vec<PlayOrigin>), Vec<
     parse_inner(src, std::path::Path::new("."))
 }
 
+/// Same as `parse_with_origins`, but imports resolve against `base_dir`
+/// (e.g. the directory of the file whose text is being edited).
+pub fn parse_with_origins_in(
+    src: &str,
+    base_dir: &std::path::Path,
+) -> Result<(Timeline, Vec<PlayOrigin>), Vec<Diag>> {
+    parse_inner(src, base_dir)
+}
+
 /// Skip to just past the next `;` so parsing can continue after an error.
 fn sync(p: &mut P) {
     while let Some(t) = p.bump() {

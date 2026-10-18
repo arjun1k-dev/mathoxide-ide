@@ -1,9 +1,9 @@
 mod app;
+mod completion;
 mod assets;
 mod editor;
 mod export;
 mod inspector;
-mod scene_tree;
 mod timeline;
 mod viewport;
 mod watcher;
@@ -26,8 +26,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("MathOxide IDE")
-            .with_inner_size([1280.0, 780.0])
-            .with_min_inner_size([960.0, 540.0]),
+            .with_inner_size([1280.0, 800.0])
+            .with_resizable(false),
         ..Default::default()
     };
 

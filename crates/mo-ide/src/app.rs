@@ -2,7 +2,6 @@ use crate::assets::{AssetAction, AssetPanel};
 use crate::editor::EditorPanel;
 use crate::export::{export_moab, export_mp4};
 use crate::inspector::{InspectorAction, InspectorPanel};
-use crate::scene_tree::SceneTreePanel;
 use crate::timeline::TimelinePanel;
 use crate::viewport::ViewportPanel;
 use crate::watcher::FileWatcher;
@@ -32,15 +31,7 @@ pub struct MathOxideApp {
     selected_mobject: Option<String>,
     overrides: HashMap<String, (f32, f32)>,
 
-    // View toggles
-    show_editor: bool,
-    show_assets: bool,
-    show_scene_tree: bool,
-    show_inspector: bool,
-    show_timeline: bool,
 
-    // Left panel active tab (0: Editor, 1: Assets, 2: Scene Tree)
-    left_tab: usize,
 
     // Timing and FPS
     last_frame_instant: Instant,
@@ -72,11 +63,38 @@ impl MathOxideApp {
         camera.height = initial_h as f32;
         camera.frame_height = 8.0;
 
-        let project_dir = crate::assets::src_home();
-        let asset_panel = AssetPanel::new(project_dir);
+        let mut asset_panel = AssetPanel::new(crate::assets::src_home());
+        asset_panel.restore_session();
+
+        // Cyberpunk chrome: void purple panels, cyan selection/cursor.
+        cc.egui_ctx.set_visuals({
+            let mut v = cc.egui_ctx.style().visuals.clone();
+            v.panel_fill = Color32::from_rgb(0x0A, 0x00, 0x2B);        // panels
+            v.window_fill = Color32::from_rgb(0x0A, 0x00, 0x2B);
+            v.extreme_bg_color = Color32::from_rgb(0x05, 0x00, 0x1A);  // text fields, deepest
+            v.faint_bg_color = Color32::from_rgb(0x15, 0x00, 0x33);    // stripes / active-line tint
+            v.selection.bg_fill = Color32::from_rgba_premultiplied(0x00, 0xFF, 0xF7, 60);
+            v.selection.stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(0x00, 0xFF, 0xF7));
+            let theme_widget = |w: &mut egui::style::WidgetVisuals| {
+                w.bg_fill = Color32::from_rgb(0x15, 0x00, 0x33);
+                w.weak_bg_fill = Color32::from_rgb(0x0F, 0x00, 0x28);
+                w.fg_stroke.color = Color32::from_rgb(0xE8, 0xE0, 0xFF);
+                w.bg_stroke.color = Color32::from_rgb(0x33, 0x00, 0x66); // borders
+            };
+            theme_widget(&mut v.widgets.noninteractive);
+            theme_widget(&mut v.widgets.inactive);
+            theme_widget(&mut v.widgets.hovered);
+            theme_widget(&mut v.widgets.active);
+            theme_widget(&mut v.widgets.open);
+            v
+        });
 
         // Most recently edited master across all video projects wins.
-        let path = initial_file.or_else(|| newest_master(&asset_panel.project_path));
+        let path = initial_file.or_else(|| {
+            crate::assets::newest_master_project(&asset_panel.project_path)
+                .map(|p| p.join("master.moa"))
+                .filter(|p| p.exists())
+        });
         let (code, actual_path, watcher) = if let Some(p) = path.filter(|p| p.exists()) {
             let content = std::fs::read_to_string(&p).unwrap_or_default();
             let w = FileWatcher::new(&p).ok();
@@ -87,17 +105,17 @@ impl MathOxideApp {
         };
 
         let mut editor_panel = EditorPanel::new(code.clone());
-        let (timeline, play_origins, err) = compile_code(&code);
+        let (timeline, play_origins, err) = compile_code_in(&code, &asset_panel.project_path);
         editor_panel.set_error(err);
 
-        Ok(Self {
+        let mut app = Self {
             render_state,
             renderer,
             viewport_panel,
             editor_panel,
             asset_panel,
             timeline_panel: TimelinePanel::default(),
-            file_path: actual_path,
+            file_path: actual_path.clone(),
             watcher,
             timeline,
             play_origins,
@@ -105,18 +123,18 @@ impl MathOxideApp {
             current_time: 0.0,
             selected_mobject: None,
             overrides: HashMap::new(),
-            show_editor: true,
-            show_assets: true,
-            show_scene_tree: true,
-            show_inspector: true,
-            show_timeline: true,
-            left_tab: 0,
             last_frame_instant: Instant::now(),
             fps: 60.0,
             frame_count: 0,
             fps_timer: Instant::now(),
             status_message: Some(("MathOxide Studio ready — pair programming environment active".into(), Instant::now())),
-        })
+        };
+        if let Some(p) = actual_path {
+            if let Some(proj) = crate::assets::project_of(&p, &app.asset_panel.project_path) {
+                app.asset_panel.set_active_project(proj);
+            }
+        }
+        Ok(app)
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -125,10 +143,13 @@ impl MathOxideApp {
 
     pub fn open_file(&mut self, path: PathBuf) {
         if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Some(proj) = crate::assets::project_of(&path, &self.asset_panel.project_path) {
+                self.asset_panel.set_active_project(proj);
+            }
             self.file_path = Some(path.clone());
             self.editor_panel.code = content.clone();
             self.editor_panel.is_dirty = false;
-            let (tl, origins, err) = compile_code(&content);
+            let (tl, origins, err) = compile_code_in(&content, &path.parent().unwrap_or(std::path::Path::new(".")));
                 self.play_origins = origins;
             self.timeline = tl;
             self.editor_panel.set_error(err);
@@ -167,10 +188,39 @@ impl MathOxideApp {
             .set_directory(&self.asset_panel.project_path)
             .pick_folder()
         {
-            self.asset_panel.project_path = folder.clone();
-            self.asset_panel.rescan();
-            self.set_status(format!("Active project: {}", folder.display()));
+            self.change_src_home(folder);
         }
+    }
+
+    /// Point the studio at a picked folder. If it is itself a project
+    /// (has master.moa), it becomes the active project; otherwise it's the
+    /// source root and we activate its newest master's project.
+    pub fn change_src_home(&mut self, folder: PathBuf) {
+        if folder.join("master.moa").exists() {
+            let root = folder.parent().map(|p| p.to_path_buf()).unwrap_or_else(crate::assets::src_home);
+            self.asset_panel.project_path = root;
+            self.asset_panel.set_active_project(folder.clone());
+            self.asset_panel.rescan();
+            self.open_file(folder.join("master.moa"));
+            return;
+        }
+        self.asset_panel.project_path = folder.clone();
+        self.asset_panel.rescan();
+        let newest = crate::assets::newest_master_project(&folder);
+        match newest {
+            Some(project) => {
+                self.asset_panel.set_active_project(project.clone());
+                let master = project.join("master.moa");
+                if master.exists() {
+                    self.open_file(master);
+                }
+            }
+            None => {
+                self.asset_panel.active_project = None;
+                self.asset_panel.persist();
+            }
+        }
+        self.set_status(format!("Source folder: {}", folder.display()));
     }
 
     pub fn save_as(&mut self) {
@@ -228,7 +278,7 @@ impl MathOxideApp {
             if let Ok(content) = std::fs::read_to_string(path) {
                 self.editor_panel.code = content.clone();
                 self.editor_panel.is_dirty = false;
-                let (tl, origins, err) = compile_code(&content);
+                let (tl, origins, err) = compile_code_in(&content, &path.parent().unwrap_or(std::path::Path::new(".")));
                 self.play_origins = origins;
                 self.timeline = tl;
                 self.editor_panel.set_error(err);
@@ -237,11 +287,15 @@ impl MathOxideApp {
         }
     }
 
-    /// Folder of the active file's video project (parent of `master.moa`, or
-    /// the folder containing an `assets/` parent).
+    /// The active project: explicitly selected one wins; else the open file's.
     fn active_project(&self) -> Option<PathBuf> {
-        let path = self.file_path.as_ref()?;
-        crate::assets::project_of(path, &self.asset_panel.project_path)
+        self.asset_panel
+            .active_project
+            .clone()
+            .or_else(|| {
+                let path = self.file_path.as_ref()?;
+                crate::assets::project_of(path, &self.asset_panel.project_path)
+            })
     }
 
     /// Project's master.moa, if the project folder has one.
@@ -279,6 +333,7 @@ impl MathOxideApp {
         }
         match std::fs::write(dir.join("master.moa"), new_master_template()) {
             Ok(()) => {
+                self.asset_panel.set_active_project(dir.clone());
                 self.open_file(dir.join("master.moa"));
                 self.asset_panel.rescan();
                 self.asset_panel.new_video_name.clear();
@@ -288,16 +343,39 @@ impl MathOxideApp {
         }
     }
 
-    pub fn new_asset(&mut self) {
-        // Belongs to the active video project; fall back to the source home.
-        let project = self.active_project().unwrap_or_else(crate::assets::src_home);
+    /// Import base dir: the open file's folder (so `import "assets/x.moa"` works
+    /// from any CWD), falling back to the active project, then the source root.
+    fn compile_base_dir(&self) -> PathBuf {
+        self.file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(|| self.asset_panel.active_project.clone())
+            .unwrap_or_else(crate::assets::src_home)
+    }
+
+    pub fn new_asset(&mut self, raw_name: &str) {
+        let name: String = raw_name
+            .trim()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect();
+        let Some(project) = self.active_project() else {
+            self.set_status("Select a project first — click one in the Videos panel, or create one");
+            return;
+        };
+        if name.is_empty() {
+            self.set_status("Type a name for the new asset first");
+            return;
+        }
+
         let assets_dir = project.join("assets");
         let _ = std::fs::create_dir_all(&assets_dir);
         let mut idx = 1;
-        let mut target = assets_dir.join(format!("asset_{idx}.moa"));
+        let mut target = assets_dir.join(format!("{name}.moa"));
         while target.exists() {
             idx += 1;
-            target = assets_dir.join(format!("asset_{idx}.moa"));
+            target = assets_dir.join(format!("{name}-{idx}.moa"));
         }
 
         let template = new_asset_template();
@@ -307,7 +385,6 @@ impl MathOxideApp {
         }
         self.open_file(target.clone());
         self.asset_panel.rescan();
-        self.left_tab = 0;
 
         // Wire the asset into the project's master automatically.
         let stem = target.file_stem().unwrap_or_default().to_string_lossy().replace('-', "_");
@@ -321,12 +398,14 @@ impl MathOxideApp {
                     code.push_str(&import_line);
                     code.push('\n');
                     let _ = std::fs::write(&master, &code);
+                    self.asset_panel.new_asset_name.clear();
                     self.asset_panel.rescan();
                     self.set_status(format!("Created asset & wired import into {}", master.display()));
                     return;
                 }
             }
         }
+        self.asset_panel.new_asset_name.clear();
         self.set_status(format!("Created asset {}", target.display()));
     }
 }
@@ -369,22 +448,30 @@ impl eframe::App for MathOxideApp {
             ctx.request_repaint();
         }
 
-        // Global Keyboard shortcuts
+        // Global keyboard shortcuts. Playback / camera keys are gated on the
+        // editor NOT holding focus, so typing never triggers them.
+        let editor_focused = self.editor_panel.focus_held;
         ctx.input(|i| {
-            if i.key_pressed(egui::Key::Space) {
-                self.timeline_panel.playing = !self.timeline_panel.playing;
-            }
-            if i.key_pressed(egui::Key::Home) {
-                self.current_time = 0.0;
-            }
-            if i.key_pressed(egui::Key::ArrowRight) {
-                self.timeline_panel.playing = false;
-                let dur = self.timeline.as_ref().map(|t| t.duration()).unwrap_or(0.0);
-                self.current_time = (self.current_time + 1.0 / 60.0).min(dur);
-            }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                self.timeline_panel.playing = false;
-                self.current_time = (self.current_time - 1.0 / 60.0).max(0.0);
+            if !editor_focused {
+                if i.key_pressed(egui::Key::Space) {
+                    self.timeline_panel.playing = !self.timeline_panel.playing;
+                }
+                if i.key_pressed(egui::Key::Home) {
+                    self.current_time = 0.0;
+                }
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    self.timeline_panel.playing = false;
+                    let dur = self.timeline.as_ref().map(|t| t.duration()).unwrap_or(0.0);
+                    self.current_time = (self.current_time + 1.0 / 60.0).min(dur);
+                }
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    self.timeline_panel.playing = false;
+                    self.current_time = (self.current_time - 1.0 / 60.0).max(0.0);
+                }
+                if i.key_pressed(egui::Key::R) && !i.modifiers.any() {
+                    self.camera.reset();
+                    self.set_status("Camera reset to 2D default");
+                }
             }
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S) {
                 self.save_as();
@@ -395,11 +482,8 @@ impl eframe::App for MathOxideApp {
                 self.open_file_dialog();
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::N) {
-                self.new_asset();
-            }
-            if i.key_pressed(egui::Key::R) && !i.modifiers.any() {
-                self.camera.reset();
-                self.set_status("Camera reset to 2D default");
+                let name = self.asset_panel.new_asset_name.clone();
+                self.new_asset(&name);
             }
         });
 
@@ -408,7 +492,8 @@ impl eframe::App for MathOxideApp {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Asset (Ctrl+N)").clicked() {
-                        self.new_asset();
+                        let name = self.asset_panel.new_asset_name.clone();
+                        self.new_asset(&name);
                         ui.close_menu();
                     }
                     ui.label(
@@ -483,11 +568,6 @@ impl eframe::App for MathOxideApp {
                 });
 
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.show_editor, "Code Editor");
-                    ui.checkbox(&mut self.show_assets, "Asset Browser");
-                    ui.checkbox(&mut self.show_scene_tree, "Scene Tree");
-                    ui.checkbox(&mut self.show_inspector, "Inspector");
-                    ui.checkbox(&mut self.show_timeline, "Timeline");
                     ui.separator();
                     if ui.button("Reset Camera (R)").clicked() {
                         self.camera.reset();
@@ -514,7 +594,7 @@ impl eframe::App for MathOxideApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some((msg, created)) = &self.status_message {
                         if now.duration_since(*created).as_secs_f32() < 4.5 {
-                            ui.colored_label(Color32::from_rgb(125, 207, 255), msg);
+                            ui.colored_label(Color32::from_rgb(0x00, 0xFF, 0xF7), msg);
                         }
                     }
                     ui.separator();
@@ -529,220 +609,219 @@ impl eframe::App for MathOxideApp {
                         egui::RichText::new(format!("[{file_label}]"))
                             .monospace()
                             .size(11.0)
-                            .color(Color32::from_rgb(140, 160, 190)),
+                            .color(Color32::from_rgb(0xB8, 0xA8, 0xE8)),
                     );
                 });
             });
         });
 
-        // Bottom Timeline Panel
-        if self.show_timeline {
-            egui::TopBottomPanel::bottom("bottom_timeline_panel")
-                .resizable(true)
-                .default_height(110.0)
-                .min_height(75.0)
-                .show(ctx, |ui| {
-                    let mut panel = std::mem::take(&mut self.timeline_panel);
-                    let tl_action = panel.show(
-                        ui,
-                        self.timeline.as_mut(),
-                        &self.play_origins,
-                        &mut self.current_time,
-                    );
-                    self.timeline_panel = panel;
-                    match tl_action {
-                        Some(crate::timeline::TimelineAction::Edited) => {
-                            self.editor_panel.is_dirty = true;
-                        }
-                        Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
-                            match mo_dsl::parse_with_origins(&self.editor_panel.code) {
-                                Ok((_, origins))
-                                    if origins.len() == run_times.len() =>
-                                {
-                                    match crate::timeline::apply_timings_multi(
-                                        &self.editor_panel.code,
-                                        &origins,
-                                        &run_times,
-                                    ) {
-                                        Some((new_code, asset_writes)) => {
-                                            let mut written = 0;
-                                            for (path, content) in &asset_writes {
-                                                if std::fs::write(path, content).is_ok() {
-                                                    written += 1;
-                                                }
-                                            }
-                                            self.editor_panel.code = new_code;
-                                            let (tl, origins, err) = compile_code(&self.editor_panel.code);
-                self.play_origins = origins;
-                                            if let Some(t) = tl {
-                                                self.timeline = Some(t);
-                                            }
-                                            self.editor_panel.set_error(err);
-                                            self.editor_panel.is_dirty = true;
-                                            if written > 0 {
-                                                self.set_status(format!(
-                                                    "Timings applied: master + {written} asset file(s) updated"
-                                                ));
-                                            } else {
-                                                self.set_status("Timeline timings written to code");
+        // ===== Fixed layout: timeline bottom, explorer leftmost, editor, right column =====
+
+        // Bottom: timeline (fixed height, not resizable)
+        egui::TopBottomPanel::bottom("bottom_timeline_panel")
+            .exact_height(150.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let mut panel = std::mem::take(&mut self.timeline_panel);
+                let tl_action = panel.show(
+                    ui,
+                    self.timeline.as_mut(),
+                    &self.play_origins,
+                    &mut self.current_time,
+                );
+                self.timeline_panel = panel;
+                match tl_action {
+                    Some(crate::timeline::TimelineAction::Edited) => {
+                        self.editor_panel.is_dirty = true;
+                    }
+                    Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
+                        match mo_dsl::parse_with_origins(&self.editor_panel.code) {
+                            Ok((_, origins))
+                                if origins.len() == run_times.len() =>
+                            {
+                                match crate::timeline::apply_timings_multi(
+                                    &self.editor_panel.code,
+                                    &origins,
+                                    &run_times,
+                                ) {
+                                    Some((new_code, asset_writes)) => {
+                                        let mut written = 0;
+                                        for (path, content) in &asset_writes {
+                                            if std::fs::write(path, content).is_ok() {
+                                                written += 1;
                                             }
                                         }
-                                        None => {
-                                            self.set_status("Apply failed: could not read/rewrite an imported asset file");
+                                        self.editor_panel.code = new_code;
+                                        let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
+                self.play_origins = origins;
+                                        if let Some(t) = tl {
+                                            self.timeline = Some(t);
+                                        }
+                                        self.editor_panel.set_error(err);
+                                        self.editor_panel.is_dirty = true;
+                                        if written > 0 {
+                                            self.set_status(format!(
+                                                "Timings applied: master + {written} asset file(s) updated"
+                                            ));
+                                        } else {
+                                            self.set_status("Timeline timings written to code");
                                         }
                                     }
-                                }
-                                _ => {
-                                    self.set_status("Cannot apply: run times and plays out of sync — recompile first");
+                                    None => {
+                                        self.set_status("Apply failed: could not read/rewrite an imported asset file");
+                                    }
                                 }
                             }
+                            _ => {
+                                self.set_status("Cannot apply: run times and plays out of sync — recompile first");
+                            }
                         }
-                        None => {}
                     }
-                });
-        }
+                    None => {}
+                }
+            });
 
-        // Left Panel: Tabs for Editor, Assets, and Scene Tree
-        if self.show_editor || self.show_assets || self.show_scene_tree {
-            egui::SidePanel::left("left_side_panel")
-                .resizable(true)
-                .default_width(320.0)
-                .min_width(220.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if self.show_editor && ui.selectable_label(self.left_tab == 0, "📝 Editor").clicked() {
-                            self.left_tab = 0;
+        // Leftmost: Explorer (always open, fixed width)
+        egui::SidePanel::left("explorer_panel")
+            .exact_width(270.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let action = self.asset_panel.show(ui, self.file_path.as_deref());
+                match action {
+                    AssetAction::Open(path) => {
+                        eprintln!("[app] opening: {}", path.display());
+                        self.open_file(path);
+                    }
+                    AssetAction::InsertImport { path, alias } => {
+                        let stmt = format!("import \"{path}\" as {alias} at (0, 0);\n");
+                        self.editor_panel.code.push_str(&stmt);
+                        let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
+                self.play_origins = origins;
+                        if let Some(t) = tl {
+                            self.timeline = Some(t);
                         }
-                        if self.show_assets && ui.selectable_label(self.left_tab == 1, "📁 Assets").clicked() {
-                            self.left_tab = 1;
+                        self.editor_panel.set_error(err);
+                        self.editor_panel.is_dirty = true;
+                        self.set_status(format!("Imported '{alias}' into scene"));
+                    }
+                    AssetAction::NewAsset { name } => {
+                        self.new_asset(&name);
+                    }
+                    AssetAction::NewVideo => {
+                        let name = self.asset_panel.new_video_name.clone();
+                        self.new_video(&name);
+                    }
+                    AssetAction::SelectProject(path) => {
+                        self.asset_panel.set_active_project(path.clone());
+                        self.asset_panel.rescan();
+                        let master = path.join("master.moa");
+                        if master.exists() {
+                            self.open_file(master);
+                        } else {
+                            self.set_status(format!("Active project: {}", path.display()));
                         }
-                        if self.show_scene_tree && ui.selectable_label(self.left_tab == 2, "🌳 Scene Tree").clicked() {
-                            self.left_tab = 2;
+                    }
+                    AssetAction::Deleted(path) => {
+                        if self.file_path.as_deref() == Some(path.as_path()) {
+                            self.file_path = None;
+                            self.watcher = None;
+                            self.timeline = None;
+                            self.set_status("File deleted — editor cleared");
+                        } else {
+                            self.set_status("Deleted");
                         }
-                    });
-                    ui.separator();
-
-                    match self.left_tab {
-                        0 if self.show_editor => {
-                            let (code_changed, save_req) = self.editor_panel.show(ui);
-                            if save_req {
-                                self.save_current_file();
+                    }
+                    AssetAction::Renamed { old, new } => {
+                        if self.file_path.as_deref() == Some(old.as_path()) {
+                            self.file_path = Some(new.clone());
+                            if let Some(w) = &mut self.watcher {
+                                let _ = w.watch_file(&new);
                             }
-                            if code_changed && self.editor_panel.auto_compile {
-                                let (tl, origins, err) = compile_code(&self.editor_panel.code);
+                        }
+                        self.asset_panel.rescan();
+                        self.set_status(format!("Renamed to {}", new.display()));
+                    }
+                    AssetAction::ChangeSrcHome(folder) => {
+                        self.change_src_home(folder);
+                    }
+                    AssetAction::None => {}
+                }
+            });
+
+        // Next to explorer: Code Editor (fixed width, horizontal scroll inside)
+        egui::SidePanel::left("editor_side_panel")
+            .exact_width(430.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let (code_changed, save_req) = self.editor_panel.show(ui);
+                if save_req {
+                    self.save_current_file();
+                }
+                if code_changed && self.editor_panel.auto_compile {
+                    let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
+                self.play_origins = origins;
+                    if let Some(t) = tl {
+                        self.timeline = Some(t);
+                    }
+                    self.editor_panel.set_error(err);
+                }
+            });
+
+        // Right column: viewport on top, inspector docked below (fixed)
+        egui::SidePanel::right("right_column")
+            .exact_width(560.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                egui::TopBottomPanel::bottom("inspector_dock")
+                    .exact_height(300.0)
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        let current_state = if let Some(tl) = &self.timeline {
+                            Player::state_at(tl, self.current_time)
+                        } else {
+                            HashMap::new()
+                        };
+                        let inspector_action = InspectorPanel::show(
+                            ui,
+                            self.timeline.as_ref(),
+                            &current_state,
+                            &mut self.selected_mobject,
+                            &mut self.overrides,
+                            &mut self.camera,
+                            self.current_time,
+                        );
+
+                        if let InspectorAction::ApplyShift { id, dx, dy } = inspector_action {
+                            if let Some(updated_code) = apply_shift_to_dsl(&self.editor_panel.code, &id, dx, dy) {
+                                self.editor_panel.code = updated_code;
+                                self.overrides.remove(&id);
+                                let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
                 self.play_origins = origins;
                                 if let Some(t) = tl {
                                     self.timeline = Some(t);
                                 }
                                 self.editor_panel.set_error(err);
+                                self.editor_panel.is_dirty = true;
+                                self.set_status(format!("Applied position ({:+.2}, {:+.2}) to code for '{}'", dx, dy, id));
                             }
                         }
-                        1 if self.show_assets => {
-                            let action = self.asset_panel.show(ui, self.file_path.as_deref());
-                            match action {
-                                AssetAction::Open(path) => {
-                                    self.open_file(path);
-                                }
-                                AssetAction::InsertImport { path, alias } => {
-                                    let stmt = format!("import \"{path}\" as {alias} at (0, 0);\n");
-                                    self.editor_panel.code.push_str(&stmt);
-                                    let (tl, origins, err) = compile_code(&self.editor_panel.code);
-                self.play_origins = origins;
-                                    if let Some(t) = tl {
-                                        self.timeline = Some(t);
-                                    }
-                                    self.editor_panel.set_error(err);
-                                    self.editor_panel.is_dirty = true;
-                                    self.set_status(format!("Imported '{alias}' into scene"));
-                                }
-                                AssetAction::OpenFile => {
-                                    self.open_file_dialog();
-                                }
-                                AssetAction::NewAsset => {
-                                    self.new_asset();
-                                }
-                                AssetAction::NewVideo => {
-                                    let name = self.asset_panel.new_video_name.clone();
-                                    self.new_video(&name);
-                                }
-                                AssetAction::ChangeSrcHome(folder) => {
-                                    self.set_status(format!("Source folder: {}", folder.display()));
-                                }
-                                AssetAction::None => {}
-                            }
-                        }
-                        2 if self.show_scene_tree => {
-                            let current_state = if let Some(tl) = &self.timeline {
-                                Player::state_at(tl, self.current_time)
-                            } else {
-                                HashMap::new()
-                            };
-                            SceneTreePanel::show(
-                                ui,
-                                self.timeline.as_ref(),
-                                &current_state,
-                                &mut self.selected_mobject,
-                            );
-                        }
-                        _ => {}
-                    }
-                });
-        }
+                    });
 
-        // Right Panel: Inspector
-        if self.show_inspector {
-            egui::SidePanel::right("right_inspector_panel")
-                .resizable(true)
-                .default_width(260.0)
-                .min_width(180.0)
-                .show(ctx, |ui| {
-                    let current_state = if let Some(tl) = &self.timeline {
-                        Player::state_at(tl, self.current_time)
-                    } else {
-                        HashMap::new()
-                    };
-                    let inspector_action = InspectorPanel::show(
-                        ui,
-                        self.timeline.as_ref(),
-                        &current_state,
-                        &mut self.selected_mobject,
-                        &mut self.overrides,
-                        &mut self.camera,
-                        self.current_time,
-                    );
-
-                    if let InspectorAction::ApplyShift { id, dx, dy } = inspector_action {
-                        if let Some(updated_code) = apply_shift_to_dsl(&self.editor_panel.code, &id, dx, dy) {
-                            self.editor_panel.code = updated_code;
-                            self.overrides.remove(&id);
-                            let (tl, origins, err) = compile_code(&self.editor_panel.code);
-                self.play_origins = origins;
-                            if let Some(t) = tl {
-                                self.timeline = Some(t);
-                            }
-                            self.editor_panel.set_error(err);
-                            self.editor_panel.is_dirty = true;
-                            self.set_status(format!("Applied position ({:+.2}, {:+.2}) to code for '{}'", dx, dy, id));
-                        }
-                    }
-                });
-        }
-
-        // Central Panel: GPU Viewport
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(Color32::from_rgb(15, 17, 23)))
-            .show(ctx, |ui| {
-                self.viewport_panel.show(
-                    ui,
-                    &self.render_state,
-                    &mut self.renderer,
-                    self.timeline.as_ref(),
-                    self.current_time,
-                    &mut self.camera,
-                    &mut self.selected_mobject,
-                    &mut self.overrides,
-                    self.fps,
-                );
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(Color32::from_rgb(0x05, 0x00, 0x1A)))
+                    .show_inside(ui, |ui| {
+                        self.viewport_panel.show(
+                            ui,
+                            &self.render_state,
+                            &mut self.renderer,
+                            self.timeline.as_ref(),
+                            self.current_time,
+                            &mut self.camera,
+                            &mut self.selected_mobject,
+                            &mut self.overrides,
+                            self.fps,
+                        );
+                    });
             });
     }
 }
@@ -800,31 +879,10 @@ fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<S
     }
 }
 
-/// Most recently modified master.moa under the source home, if any.
-fn newest_master(src_root: &Path) -> Option<PathBuf> {
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut stack = vec![src_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if p.file_name().map_or(false, |n| n == "master.moa") {
-                    let mtime = e.metadata().and_then(|m| m.modified()).ok();
-                    if let Some(t) = mtime {
-                        if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
-                            best = Some((t, p));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
-fn compile_code(code: &str) -> (Option<Timeline>, Vec<mo_dsl::PlayOrigin>, Option<String>) {    match mo_dsl::parse_with_origins(code) {
+/// Import base dir: the open file's folder (so `import "assets/x.moa"` works
+/// from any CWD), falling back to the active project, then the source root.
+fn compile_code_in(code: &str, base: &Path) -> (Option<Timeline>, Vec<mo_dsl::PlayOrigin>, Option<String>) {
+    match mo_dsl::parse_with_origins_in(code, base) {
         Ok((tl, origins)) => (Some(tl), origins, None),
         Err(e) => (None, Vec::new(), Some(e.iter().map(|d| format!("{}:{}: {}", d.line, d.col, d.message)).collect::<Vec<_>>().join("\n"))),
     }

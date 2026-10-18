@@ -1,112 +1,88 @@
-# MathOxide — Project Handoff Document (2026-10-18)
+# MathOxide — Project Handoff Document (2026-10-18, later)
 
 ## 1. Executive Summary & Status
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM; 16 GB RAM — buffers/lists are fine, VRAM is the constraint).
-* **Build & Test Health**: **59 workspace unit tests pass, zero compiler warnings.**
-  ```
-  mo-core:        35 passed  (incl. viridis ramp, camera_at interpolation)
-  mo-dsl:         14 passed  (incl. camera anims, import provenance, parse_file)
-  mo-ide:          7 passed  (incl. apply-timings round-trips, panel scan layouts)
-  mo-moab:         2 passed
-  mo-render:       2 passed
-  ```
-* **Latest commits on `main`** (2026-10-18):
-  - `e021156`: `fix: asset panel scans every folder layout + Open File button`
-  - `c986f4d`: `perf: iGPU-friendly high-res surfaces — buffer reuse, wireframe decimation, res clamp`
-  - `cdac4de`: `feat: project-per-video workflow — ~/mathoxide/<project>/{master.moa,assets/}`
-  - `d969921`: `feat: file-relative import resolution — parse_file()`
-  - `2d3a111`/`7b14607`/`b80e8d1`/`931aac6`: MCP timelines, cross-file timeline editing, bold-graph fix
+* **Build & Test Health**: **61 workspace unit tests pass, zero compiler warnings** (mo-ide now 9 incl. rescan grouping + prefix-span regression test).
+* This session was a full **IDE overhaul**: project-explorer workflow, fixed IDE layout, autocomplete + hover docs, cyberpunk theme, focus management, and a file-relative import fix in the editor path.
 
 ---
 
-## 2. The Project-Per-Video Model (BIGGEST CHANGE — read first)
-
-The old repo-level `assets/` + `examples/` layout is **gone**. Everything migrated to:
+## 2. Project-Per-Video Model (unchanged, still law)
 
 ```
-~/mathoxide/                      # SRC_HOME (source of truth for videos)
-├── master-showcase/
-│   ├── master.moa                # was examples/master_video.moa
-│   └── assets/{euler_formula,sine_wave}.moa
-├── demo_3d/  latex_showcase/  demo/          # self-contained masters
-├── euler_formula/  sine_wave/  gaussian_curve/  cube_3d/  camera_motion/  shaded_surface/
-│                                 # each former asset -> own project
-~/Videos/mathoxide/               # OUT_HOME (renders)
-└── <project>.mp4 | .png | .moab  # CLI + IDE export defaults
+~/mathoxide/                      # SRC_HOME
+├── <project>/master.moa + <project>/assets/*.moa
+~/Videos/mathoxide/               # OUT_HOME renders
 ```
 
-* **One video = one folder**: `~/mathoxide/<project>/master.moa` + `<project>/assets/*.moa`.
-* **Imports resolve file-relative**: `mo_dsl::parse_file(path)` lowers with `base_dir = file.parent()`; `import "assets/x.moa"` works from any CWD. `parse(src)` (string API) keeps CWD resolution for tests/compat.
-* **Renders default to OUT_HOME**: CLI `-o` is optional (`~/Videos/mathoxide/<project>.<ext>`, project folder name used when file is `master.moa`); IDE export dialogs prefill OUT_HOME + `<project>.mp4`/`.moab`.
-* **Creating is one click**: IDE Videos panel → type name → `🎬 New Video` makes the folder, master, and `assets/`. `➕ New Asset` creates in the *active project's* assets/ **and auto-appends the import line into master.moa**.
-* Helpers live in `crates/mo-ide/src/assets.rs`: `src_home()`, `out_home()`, `project_of(path, src_root)`.
-
-### Workflow invariants (do not regress)
-* One asset file open at a time in the IDE is **intentional** (fast hot reload, small edits per clip).
-* Play provenance: `mo_dsl::PlayOrigin { file: Option<PathBuf>, local_play_idx: usize }` — recorded per play in flat timeline order by the import lowerer (`parser.rs`, `lower(raws, base_dir)`). Powers cross-file timing rewrites.
+* One video = one folder. Imports resolve file-relative (`parse_file`, `parse_with_origins_in`).
+* Renders default to OUT_HOME. Play provenance (`PlayOrigin`) powers cross-file timing edits.
+* Session state persists in `~/.config/mathoxide/studio.toml` (`src_root`, `active_project`), restored on IDE launch; falls back to newest-master project.
 
 ---
 
-## 3. What Changed Since the Previous Handoff (2026-10-17 → 10-18)
+## 3. What Changed This Session (IDE overhaul)
 
 | Area | Before | Now |
 |---|---|---|
-| **Bold graphs** | `plot` default `sw=4.0` (2× axes weight); assets had explicit `sw=3.5/4` | Plot default **2.0**, asset files matched to axes weight. Plots read light like manim. |
-| **Timeline × imports** | `💾 Apply Timings to Code` **refused** any scene with `import` | Cross-file apply: `apply_timings_multi(master, origins, run_times)` rewrites master's own `Ns` positionally **and each imported asset file's durations in place** (timeline.rs). Timeline blocks show asset labels (`euler: write(euler_id)`). |
-| **MCP timing knowledge** | `list_assets`/`read_asset` only had totals | Both return a `timeline` array: per-play `start`/`end`/`run_time`/`anim` — agents know exact overlaps instead of guessing. `list_assets` walks the whole project tree by default (`~/mathoxide`). |
-| **Project workflow** | Masters in `examples/`, assets in `assets/`, CWD-relative imports, hardcoded import template | Project-per-video model above; file-relative imports; New Video / New Asset / Open File all in-IDE; startup opens most recently edited `master.moa`. |
-| **High-res surfaces** | `res=300` filled surface3d → ~540k curves; per-frame GPU buffer allocation per object; lag + shutdown | Content-hashed **GPU buffer cache** (upload once for static geometry); **wireframe decimation** (`surface_3d_filled_with_stride`, auto ~20k wire curves, DSL `wire_stride=N`); `res` clamped to 400/axis. res=300 renders cleanly. |
-| **Parser fix** | `rotate(c, 1.5708)` failed (animation args only accepted identifiers) | Numeric args accepted as strings; `rotate` lowers with explicit angle. |
+| **Explorer** | Flat asset list in a tab, congested | **Permanent leftmost Explorer column**: active project's `master.moa` on top (click-only), `assets/` always expanded below, click opens, right-click → Open / Insert import / Rename (inline) / Delete (confirm dialog). Loose root .moa in own section. Project dropdown switches active project (opens its master). Auto-rescan every 2s — external (MCP/CLI) changes appear automatically. |
+| **Layout** | Tabbed left panel, resizable everything | **Fixed IDE layout**: Explorer (270px) → Editor (430px, h-scrolls, never wraps) → right column (Viewport over Inspector 300px) → Timeline dock (150px). Nothing resizable; app window 1280×800 non-resizable. Scene Tree panel removed. |
+| **Editor** | Plain highlighting | **Autocomplete** (typing any letter pops matching builtins + user symbols — object ids and import aliases scanned live; ↑/↓/Enter/Tab/Esc, click-to-accept, caret lands after insertion), **hover docs** (0.6s stationary on any builtin → signature + description), **cyberpunk theme** (keywords #FF00A8, anims #F5FF00, types #C724FF, ids/easings #00FF9D, strings #00FFF7, numbers #FF6B35, comments #8A2BE2, operators #00D4FF; chrome: panels #0A002B, editor bg #05001A, gutter #4A0099, cursor/selection #00FFF7). |
+| **Focus** | Caret lost on error-bar layout shift; Space/arrows/R hijacked typing | Editor **claims free keyboard focus every frame** (`EditorPanel::focus_held`); global playback/camera shortcuts gated on `!focus_held`. Ctrl+S/O/N still global. |
+| **Imports in IDE** | `parse_with_origins` used CWD → `Could not find imported asset` | New `mo_dsl::parse_with_origins_in(src, base_dir)`; IDE compiles with the open file's folder (`compile_base_dir()`), falling back to active project then src_home. |
+| **New Asset** | Auto-named `asset_N.moa`, orphaned into src_home with no project | Named inline (➕ by `assets/` or right-click header), created in **active project** only; auto-imports into its master.moa. No src_home fallback. |
 
 ---
 
 ## 4. Workspace Crates & Architecture
 
 ```
-mathoxide/                       # code only now — no scene files
+mathoxide/
 ├── crates/
 │   ├── mo-core                 # engine: VGroup, geom (surface_3d[_filled_with_stride]), math, camera, Player
 │   ├── mo-render               # wgpu renderer; buf_cache in pipelines.rs draw_scene_pass
-│   ├── mo-dsl                  # .moa parser: parse / parse_file / parse_with_origins, PlayOrigin
+│   ├── mo-dsl                  # .moa parser: parse / parse_file / parse_with_origins[_in], PlayOrigin
 │   ├── mo-moab                 # .moab container (postcard, versioned)
-│   ├── mo-cli                  # `mo`: validate/render/compile/preview/inspect; parse_file everywhere; -o optional
-│   ├── mo-interactive          # winit preview window (NOTE: camera anims not applied here yet)
-│   ├── mo-ide                  # MathOxide Studio (egui/eframe): assets.rs has src_home/out_home
+│   ├── mo-cli                  # `mo`: validate/render/compile/preview/inspect; -o optional
+│   ├── mo-interactive          # winit preview window (camera anims not applied here yet)
+│   ├── mo-ide                  # Studio (egui/eframe): app.rs (fixed layout, focus, shortcuts),
+│   │                           #   assets.rs (Explorer + project model), editor.rs (highlight,
+│   │                           #   autocomplete UI, hover docs), completion.rs (catalog, symbol
+│   │                           #   scan, prefix-span helpers), timeline.rs, export.rs, watcher.rs
 │   └── mo-mcp                  # JSON-RPC stdio server; timeline arrays; project-tree scanning
 ├── shaders/                    # vendored ManimGL WGSL (reference; embedded copies in mo-render)
 └── .mcp.json                   # registers mathoxide-mcp for agents
 ```
 
+`mo-ide/src/assets.rs` still owns `src_home()`, `out_home()`, `project_of()`, `newest_master_project()`, `save_config()`.
+
 ---
 
-## 5. Key Mechanisms (cumulative, still true)
+## 5. Key Mechanisms
 
-* **16:9 letterboxed viewport** — canvas = viewport aspect-clamped to 16:9, `camera.width/height` synced; hit-testing and exports match 1:1.
-* **3D camera** — polar `φ`, azimuth `θ`, roll `γ`; right-click drag orbits, middle/shift pans, wheel zooms, `R` resets. Primitives: `axes3d`, `cube`, `sphere`, `surface3d` (filled = Viridis height-ramped cells + strided wireframe).
-* **Camera keyframes in DSL** — `play camera.orbit(phi=60, theta=-45) 2s smooth;` etc. `Player::camera_at(tl, t, base)` is stateless; wired into CLI + IDE viewport (NOT `mo preview` — known gap).
-* **Typst-powered LaTeX**, sequential subpath reveal for fonts (no synthetic stroke on glyphs, ever).
-* **Interactive timeline sequencer** — body drag trades time with preceding Wait (auto-inserted), right-edge trims run_time, `💾 Apply Timings to Code` rewrites master + asset files via `PlayOrigin`.
-* **GPU buffer cache** (`mo-render/src/pipelines.rs`) — `buf_cache: RefCell<HashMap<u64, BufCacheEntry>>`; key = hash(object id, record len, record bytes, mobject uniforms); >64 entries → clear. BindGroups keep backing buffers alive. Animated objects hash differently per frame and re-upload.
-* **Native file dialogs (rfd)** — Open/Save/Save As/Exports; asset panel has its own 📄 Open File and 📁 Browse (switches source root from inside the IDE).
-* **MCP tools** — `list_assets` (project-tree walk + timelines), `read_asset` (+ timeline), `write_asset`, `validate_code`, `render_frame`, `assemble_scene`.
+* **16:9 letterboxed viewport** — camera.width/height synced on resize (no resize now; fixed window).
+* **3D camera** — polar φ/θ/γ; orbit/pan/zoom; `Player::camera_at(tl, t, base)` wired into CLI + IDE (NOT `mo preview`).
+* **Typst-powered LaTeX**, sequential subpath reveal; no synthetic stroke on glyphs ever.
+* **Timeline sequencer** — drag/trim/`💾 Apply Timings to Code` via `apply_timings_multi` + `PlayOrigin` (cross-file rewrites).
+* **GPU buffer cache** (`mo-render/src/pipelines.rs`) — content-hashed uploads; wireframe decimation; res clamp 400.
+* **Explorer scan model** — `ProjectEntry { name, path, master, assets }` per folder under src_root; legacy flat `assets/`/`examples/` folders surface as pseudo-projects; root .moa files go to `loose`.
+* **Autocomplete internals** — `completion.rs` is pure/logic-side (catalog, `user_symbols`, `prefix_before_caret`, `prefix_span_at`, `line_col_of`, `word_at_line_col`); editor.rs does egui UI. Accept path replaces the *byte span* of the identifier prefix ending at the caret and restores caret via `TextEditState::load/store` + `cursor.set_char_range`.
 
 ---
 
 ## 6. How to Run & Test
 
 ```bash
-cargo test --workspace                                  # 59 tests, 0 warnings
+cargo test --workspace                                  # 61 tests, 0 warnings
 
-cargo run -p mo-ide                                     # Studio (opens newest master.moa)
+cargo run -p mo-ide                                     # Studio (1280×800 fixed)
 
-# CLI: -o optional, defaults to ~/Videos/mathoxide/<project>.<ext>
 cargo run -p mo-cli -- render ~/mathoxide/master-showcase/master.moa
-cargo run -p mo-cli -- render ~/mathoxide/master-showcase/master.moa --frame 4.5   # PNG
+cargo run -p mo-cli -- render ~/mathoxide/master-showcase/master.moa --frame 4.5
 cargo run -p mo-cli -- validate ~/mathoxide/cube_3d/master.moa
 
-# MCP (list walks ~/mathoxide, returns per-play timelines)
 printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_assets","arguments":{}}}\n' \
   | cargo run -p mo-mcp
 ```
@@ -115,32 +91,33 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
 
 ## 7. Engineering Gotchas (accumulated — keep)
 
-1. **WGPU 24**: `Instance::new(&desc)` / `request_adapter` return Results; `queue.submit(Some(enc.finish()))`; explicit stencil `read_mask`/`write_mask`.
-2. **Subpath separation**: multi-char text must keep per-character `SubPath` records — merging bridges whitespace in winding fill.
-3. **Camera uniform rescaling**: update `camera.width/height` on any resize (letterbox math in `mo-ide/src/viewport.rs`).
-4. **IDE window fits 1280×760** (14" laptop target).
-5. **No artificial stroke on fonts** — TrueType outlines are fill-only (`sw=0`).
-6. **Timeline drag borrows**: `mem::take(&mut self.timeline_panel)` in app.rs; inserting a Wait shifts the Play index — increment after insert.
-7. **Apply-timings is provenance-driven now** — `apply_timings_multi` needs `origins.len() == run_times.len()`; caller re-parses with `parse_with_origins` fresh. Never rewrite positionally across files without origins.
-8. **Animated vs interactive camera** — viewport keeps a base camera; `camera_at` result overrides during/after keyframed anims; never hold a borrow across input handling.
-9. **iGPU budget**: `res` on surface3d is samples/axis → res² cells × ~4 curves. Clamp 400. Wireframe on filled surfaces is stride-decimated; full wireframe (`fill` omitted) is intentionally the surface itself.
-10. **Regex-massaged code in app.rs**: some `let (tl, origins, err) = compile_code(...)` lines have odd indentation from scripted edits — harmless, fix opportunistically.
+1. **WGPU 24**: `Instance::new(&desc)` / `request_adapter` return Results; explicit stencil masks.
+2. **Subpath separation** for multi-char text (winding-fill whitespace bug).
+3. **No artificial stroke on fonts** (`sw=0`).
+4. **Timeline drag borrows**: `mem::take(&mut self.timeline_panel)`; Wait insert shifts Play index.
+5. **Apply-timings needs origins** — `origins.len() == run_times.len()`; re-parse fresh with `parse_with_origins` (or `_in`).
+6. **iGPU budget**: res clamp 400, stride-decimated wireframes.
+7. **egui 0.31 APIs**: `TextEditState::load/store(ctx, id)` (not `read`), `cursor.char_range()`/`set_char_range(CCursorRange{primary, secondary})`, `rect_stroke(rect, radius, stroke, StrokeKind)`, `WidgetVisuals` via named fields (no `values_mut`), `Label` needs `.sense(Sense::click())` for clicks, `ui.indent` is **vertical-layout-only** (panics inside `ui.horizontal`).
+8. **Byte vs char indices**: egui cursors are char-based; `str::replace_range` is byte-based. Always go through `prefix_span_at` — the naive mix produced "extra chars" on accept.
+9. **`ui.indent` / scanner panics on empty input**: guard `words.first()` in line scanners (blank lines hit `words[0]`).
+10. **Panel scans**: keep the 2s auto-rescan in `AssetPanel::show`; never trust a stale cache after external writes.
+11. **Focus contract**: editor reclaims focus only when *no* widget holds it (so inline rename / new-asset fields still work); global single-key shortcuts must check `editor_panel.focus_held`.
+12. **Animated vs interactive camera** — viewport keeps a base camera; `camera_at` overrides during/after keyframed anims.
 
 ---
 
 ## 8. Direction & Roadmap — Next Up
 
-Priority queue for the incoming agent:
-
-1. **Playback smoothness for dense scenes**: `Player::state_at` clones every VGroup every frame. Cache evaluated states keyed by (timeline version, t) or evaluate incrementally — the GPU side is now cached, CPU-side scrubbing at res≥200 is the remaining bottleneck.
-2. **Directional lighting / normal-based shading** for filled `surface3d` (flat shading today; normals per cell would read better at high res).
-3. **Camera anims in `mo preview`** (winit) — only CLI + IDE apply `camera_at` today.
-4. **Undo/redo** in the IDE (code edits, drags, apply-to-code round-trips).
-5. **`.mcp.json` + agent loop hardening**: `assemble_scene` should use `parse_with_origins` so generated masters carry correct timing structure; consider an MCP `apply_timings` tool mirroring the IDE's cross-file rewrite.
-6. **CLI `render` of a project folder** (e.g. `mo render ~/mathoxide/foo`) — resolve to `foo/master.moa` automatically.
+1. **Playback smoothness for dense scenes**: `Player::state_at` clones every VGroup every frame — cache/incremental CPU evaluation is the remaining bottleneck (GPU side is cached).
+2. **Directional lighting / normal-based shading** for filled `surface3d`.
+3. **Camera anims in `mo preview`** (winit).
+4. **Undo/redo** in the IDE (code edits, explorer rename/delete, apply-to-code round-trips).
+5. **`.mcp.json` + agent loop hardening**: `assemble_scene` should use `parse_with_origins`; consider an MCP `apply_timings` tool.
+6. **CLI `render` of a project folder** (`mo render ~/mathoxide/foo` → `foo/master.moa`).
+7. **Polish candidates from this session**: hover docs for user symbols (object ids with their param list); go-to-def style click on import aliases; error squiggles per line instead of the top error bar.
 
 ### Instructions for Future Agents
-* **Hardware**: 16 GB RAM (use it freely — caches, big Vecs), but iGPU ~128 MB VRAM: keep per-frame GPU uploads bounded, no heavy engines/compute shaders.
-* **Scenes live outside the repo** in `~/mathoxide`. Never recreate `assets/`/`examples/` in-repo; tests build temp projects instead.
+* **Hardware**: 16 GB RAM (use freely), iGPU ~128 MB VRAM (keep per-frame GPU uploads bounded).
+* **Scenes live outside the repo** in `~/mathoxide`. Never recreate `assets/`/`examples/` in-repo; tests build temp projects.
 * Keep committing clean, self-contained milestones to `main`.
-* **Arjun's preferences**: direct, mechanism-first, no fluff; assets edited one-at-a-time by design; MCP output should state timings explicitly so AI never guesses overlaps.
+* **Arjun's preferences**: direct, mechanism-first, no fluff; assets edited one-at-a-time by design; MCP output states timings explicitly so AI never guesses overlaps; IDE layout is FIXED (don't reintroduce resizable panels or tab switching); palette is cyberpunk (no grays — use deep purples for neutrals).
