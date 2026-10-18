@@ -4,12 +4,12 @@
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM; 16 GB RAM — buffers/lists are fine, VRAM is the constraint).
-* **Build & Test Health**: **62 workspace unit tests pass, zero compiler warnings** (mo-ide now 10 incl. caret preservation across error bar appearing/disappearing).
-* This session was a full **IDE overhaul**: project-explorer workflow, fixed IDE layout, autocomplete + hover docs, cyberpunk theme, focus management, file-relative imports, comment/hex color separation, high-contrast explorer file selection, and stable-ID caret preservation across errors.
+* **Build & Test Health**: **65 workspace unit tests pass, zero compiler warnings** (mo-core: 35, mo-dsl: 15, mo-ide: 11, mo-moab: 2, mo-render: 2).
+* This session was a full **IDE & Scripting overhaul**: project-explorer workflow, fixed IDE layout, autocomplete + hover docs, cyberpunk theme, focus management, file-relative imports, comment/hex color separation, high-contrast explorer file selection, stable-ID caret preservation across errors, direct composite asset animations by alias, and top-of-file import placement.
 
 ---
 
-## 2. Project-Per-Video Model (unchanged, still law)
+## 2. Project-Per-Video Model & Scripting Conventions
 
 ```
 ~/mathoxide/                      # SRC_HOME
@@ -20,6 +20,26 @@
 * One video = one folder. Imports resolve file-relative (`parse_file`, `parse_with_origins_in`).
 * Renders default to OUT_HOME. Play provenance (`PlayOrigin`) powers cross-file timing edits.
 * Session state persists in `~/.config/mathoxide/studio.toml` (`src_root`, `active_project`), restored on IDE launch; falls back to newest-master project.
+
+### Asset & Master Scripting Convention (Standard Law)
+
+1. **Asset Files (`assets/<name>.moa`)**:
+   - **Local Origin Purity**: Assets are designed around local origin `(0, 0)`. When imported in master with `at (x, y)`, all internal geometries are cleanly shifted together.
+   - **Declarative Primitives**: Declare shapes, labels, colors, and strokes (`circle`, `square`, `tex`, `text`, `arrow`, `dot`, `axes`).
+   - **Syntax Tokens**: Strict `//` comments; `#RRGGBB` or `#RRGGBBAA` for hex colors (e.g. `fill=#58C4DD33, stroke=cyan, sw=3`).
+   - Can include standalone animations for single-asset previewing, or remain purely declarative objects.
+
+2. **Master Composition (`master.moa`)**:
+   - **Top-of-File Imports**: All `import "assets/<name>.moa" as <alias> at (x, y);` statements **must stay at the very top of `master.moa`** (immediately below the header comments). The IDE automatically inserts any new or right-click imports at the top.
+   - **First-Class Composite Asset Animations**: Imported assets are automatically registered as unified composite `VGroup`s under `<alias>`. You can animate the entire asset directly with full timing and easing controls:
+     ```moa
+     play showCreation(intro_card) 2.0s smooth;
+     play write(intro_card) 1.5s smooth;
+     play transform(intro_card, conclusion_card) 2.0s smooth;
+     play fadeOut(intro_card) 1.0s;
+     wait 0.5s;
+     ```
+   - **Timeline Orchestrator**: The master script controls the macro timeline, sequencing asset entrances, camera moves (`camera polar ...`), transitions, and pacing.
 
 ---
 
@@ -34,6 +54,8 @@
 | **Focus & Caret** | Caret launched to EOF on errors due to ID shifts and focus reclaim | **Stable ID Scope & Caret Preservation**: Wrapped editor inside `ui.push_id("code_editor_fixed_scope")` with `id_salt("editor_scroll_area")` and `id_salt("code_editor_text_edit")`. The error bar appearing/disappearing no longer shifts TextEdit's ID. Added `EditorPanel::last_caret_char`; if egui tries to default caret to end-of-text on `request_focus()` / `gained_focus()`, the known caret is restored immediately. |
 | **Imports in IDE** | `parse_with_origins` used CWD → `Could not find imported asset` | New `mo_dsl::parse_with_origins_in(src, base_dir)`; IDE compiles with the open file's folder (`compile_base_dir()`), falling back to active project then src_home. |
 | **New Asset** | Auto-named `asset_N.moa`, orphaned into src_home with no project | Named inline (➕ by `assets/` or right-click header), created in **active project** only; auto-imports into its master.moa. No src_home fallback. |
+| **Top-of-File Imports** | New imports were blindly appended to the bottom of `master.moa` | `insert_import_at_top` places new imports at the top of the file directly beneath header comments or after existing imports. |
+| **Composite Asset Animation** | Imported assets could only be animated via individual sub-object IDs | The DSL automatically registers a composite `VGroup` under `<alias>` (shifted by `at (x, y)`). Master compositions can directly animate the entire imported asset using `play showCreation(alias)`, `play write(alias)`, `play transform(alias, to)`, `play fadeOut(alias)`. |
 
 ---
 
