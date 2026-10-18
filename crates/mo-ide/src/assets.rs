@@ -40,10 +40,21 @@ pub struct AssetEntry {
 pub enum AssetAction {
     None,
     Open(PathBuf),
+    OpenFile,
     InsertImport { path: String, alias: String },
     NewAsset,
     NewVideo,
     ChangeSrcHome(PathBuf),
+}
+
+/// `[project] filename`, or just `filename` when there is no project.
+fn fmt_label(project: &str, filename: &str, active: bool) -> String {
+    let marker = if active { "▶" } else { " " };
+    if project.is_empty() {
+        format!("{marker} {filename}")
+    } else {
+        format!("{marker} [{project}] {filename}")
+    }
 }
 
 pub struct AssetPanel {
@@ -67,30 +78,40 @@ impl AssetPanel {
         panel
     }
 
-    /// Recursive scan of the source home: every `<project>/master.moa` is a
-    /// master entry, every `<project>/assets/**.moa` a modular asset.
+    /// Scan the source folder in every layout:
+    /// - project model: `<root>/<project>/master.moa` + `<root>/<project>/assets/*.moa`
+    /// - loose .moa files at the root itself
+    /// - legacy flat `assets/` / `examples/` folders at the root
     pub fn rescan(&mut self) {
         self.assets.clear();
         let root = self.project_path.clone();
-        let mut collect_dir = |dir: &Path, project: String, is_master: bool| {
+        let mut seen = std::collections::HashSet::new();
+        let mut collect_dir = |dir: &Path, project: String| {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file() && path.extension().map_or(false, |ext| ext == "moa") {
-                        self.push_entry(&root, &path, project.clone(), is_master);
+                    if path.is_file() && path.extension().map_or(false, |ext| ext == "moa") && seen.insert(path.clone()) {
+                        self.push_entry(&root, &path, project.clone());
                     }
                 }
             }
         };
 
+        // Root-level .moa files (e.g. a picked project folder, or loose scenes)
+        collect_dir(&root, String::new());
+        // Legacy flat folders at the root
+        collect_dir(&root.join("assets"), "assets".into());
+        collect_dir(&root.join("examples"), "examples".into());
+
+        // One level down: video project folders
         if let Ok(projects) = std::fs::read_dir(&root) {
             for proj in projects.flatten() {
                 if !proj.path().is_dir() {
                     continue;
                 }
                 let name = proj.file_name().to_string_lossy().into_owned();
-                collect_dir(&proj.path(), name.clone(), true);
-                collect_dir(&proj.path().join("assets"), name, false);
+                collect_dir(&proj.path(), name.clone());
+                collect_dir(&proj.path().join("assets"), name);
             }
         }
 
@@ -104,9 +125,10 @@ impl AssetPanel {
         self.last_scan = Instant::now();
     }
 
-    fn push_entry(&mut self, root: &Path, path: &Path, project: String, is_master: bool) {
+    fn push_entry(&mut self, root: &Path, path: &Path, project: String) {
         if let Ok(content) = std::fs::read_to_string(path) {
             let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let is_master = content.contains("import ") || filename == "master.moa";
             let rel_path = path
                 .strip_prefix(root.join(&project))
                 .unwrap_or(path)
@@ -148,6 +170,9 @@ impl AssetPanel {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("🔄").on_hover_text("Rescan projects").clicked() {
                     self.rescan();
+                }
+                if ui.button("📄 Open File...").on_hover_text("Open any .moa file on this machine").clicked() {
+                    action = AssetAction::OpenFile;
                 }
                 if ui.button("📁 Browse...").on_hover_text("Use a different source folder").clicked() {
                     if let Some(folder) = rfd::FileDialog::new()
@@ -233,9 +258,9 @@ impl AssetPanel {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             let label_text = if is_active {
-                                format!("▶ {} — {}", entry.project, entry.filename)
+                                fmt_label(&entry.project, &entry.filename, true)
                             } else {
-                                format!("  {} — {}", entry.project, entry.filename)
+                                fmt_label(&entry.project, &entry.filename, false)
                             };
 
                             let btn = ui.selectable_label(is_active, label_text);
@@ -287,9 +312,9 @@ impl AssetPanel {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         let label_text = if is_active {
-                            format!("▶ [{}] {}", entry.project, entry.filename)
+                            fmt_label(&entry.project, &entry.filename, true)
                         } else {
-                            format!("  [{}] {}", entry.project, entry.filename)
+                            fmt_label(&entry.project, &entry.filename, false)
                         };
 
                         let btn = ui.selectable_label(is_active, label_text);
@@ -332,5 +357,44 @@ impl AssetPanel {
         });
 
         action
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rescan_finds_every_layout() {
+        let root = std::env::temp_dir().join("moa_panel_test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("my-video/assets")).unwrap();
+        std::fs::write(root.join("my-video/master.moa"), "circle c r=1;").unwrap();
+        std::fs::write(root.join("my-video/assets/part.moa"), "circle p r=1;").unwrap();
+        std::fs::write(root.join("loose.moa"), "circle l r=1;").unwrap();
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/legacy.moa"), "circle g r=1;").unwrap();
+
+        let mut panel = AssetPanel::new(root.clone());
+        panel.rescan();
+
+        let names: Vec<(String, bool)> = panel
+            .assets
+            .iter()
+            .map(|a| (a.filename.clone(), a.is_master))
+            .collect();
+        assert!(names.contains(&("master.moa".into(), true)), "{names:?}");
+        assert!(names.contains(&("part.moa".into(), false)), "{names:?}");
+        assert!(names.contains(&("loose.moa".into(), false)), "{names:?}");
+        assert!(names.contains(&("legacy.moa".into(), false)), "{names:?}");
+        assert_eq!(panel.assets.len(), 4);
+
+        // project attribution
+        let part = panel.assets.iter().find(|a| a.filename == "part.moa").unwrap();
+        assert_eq!(part.project, "my-video");
+        let loose = panel.assets.iter().find(|a| a.filename == "loose.moa").unwrap();
+        assert_eq!(loose.project, "");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

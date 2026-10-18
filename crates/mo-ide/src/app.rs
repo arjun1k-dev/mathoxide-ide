@@ -655,6 +655,9 @@ impl eframe::App for MathOxideApp {
                                     self.editor_panel.is_dirty = true;
                                     self.set_status(format!("Imported '{alias}' into scene"));
                                 }
+                                AssetAction::OpenFile => {
+                                    self.open_file_dialog();
+                                }
                                 AssetAction::NewAsset => {
                                     self.new_asset();
                                 }
