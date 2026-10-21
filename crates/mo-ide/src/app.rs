@@ -3,7 +3,7 @@ use crate::editor::EditorPanel;
 use crate::export::{export_moab, export_mp4};
 use crate::inspector::{InspectorAction, InspectorPanel};
 use crate::timeline::{PlaybackScope, TimelinePanel};
-use crate::viewport::ViewportPanel;
+use crate::viewport::{ViewportAction, ViewportPanel};
 use crate::watcher::FileWatcher;
 use crate::ext::eframe;
 use crate::ext::egui::{self, Color32};
@@ -14,6 +14,20 @@ use mo_render::Renderer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// State of the inline text/expr editor opened by double-clicking an object
+/// in the viewport. `owner == None` edits the open editor file; `Some(path)`
+/// edits a decl inside an imported asset file on disk.
+struct InlineEdit {
+    id: String,
+    owner: Option<PathBuf>,
+    /// Which string parameter is being edited: "text" or "expr".
+    param: &'static str,
+    draft: String,
+    /// Object center in scene coords at open time (overlay anchor).
+    anchor: (f32, f32),
+    just_opened: bool,
+}
 
 pub struct MathOxideApp {
     render_state: egui_wgpu::RenderState,
@@ -49,6 +63,8 @@ pub struct MathOxideApp {
     selection: Vec<String>,
     /// Grid snap quantum for drags/nudges (None = off; G toggles 0.25).
     snap: Option<f32>,
+    /// Active inline text/expr edit (viewport double-click), if any.
+    inline_edit: Option<InlineEdit>,
     overrides: HashMap<String, (f32, f32)>,
 
 
@@ -154,6 +170,7 @@ impl MathOxideApp {
             current_time: 0.0,
             selection: Vec::new(),
             snap: None,
+            inline_edit: None,
             overrides: HashMap::new(),
             last_frame_instant: Instant::now(),
             fps: 60.0,
@@ -214,6 +231,128 @@ impl MathOxideApp {
             if let Some(q) = self.snap.filter(|q| *q > 0.0) {
                 e.0 = (e.0 / q).round() * q;
                 e.1 = (e.1 / q).round() * q;
+            }
+        }
+    }
+
+    /// Open the inline editor for a double-clicked object: locate its decl
+    /// line (open file first, then imported asset files) and the string
+    /// param it carries.
+    fn open_inline_edit(&mut self, id: String) {
+        const PARAMS: &[&str] = &["text", "expr"];
+        let mut located = find_string_decl(&self.editor_panel.code, &id, PARAMS)
+            .map(|(_, p, v)| (None, p, v));
+        if located.is_none() {
+            let base_dir = self.compile_base_dir();
+            for line in self.editor_panel.code.lines() {
+                let words: Vec<&str> = line.trim().split_whitespace().collect();
+                if words.len() >= 4 && words[0] == "import" && words[2] == "as" {
+                    let alias = words[3].trim_end_matches(';');
+                    let prefix = format!("{alias}_");
+                    if let Some(sub_id) = id.strip_prefix(&prefix) {
+                        let f = base_dir.join(words[1].trim_matches('"'));
+                        if let Ok(code) = std::fs::read_to_string(&f) {
+                            if let Some((_, p, v)) = find_string_decl(&code, sub_id, PARAMS) {
+                                located = Some((Some(f), p, v));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let Some((owner, param, value)) = located else {
+            self.set_status(format!("'{id}' carries no inline text/expr to edit"));
+            return;
+        };
+        let anchor = self.scene_anchor_for(&id);
+        self.inline_edit = Some(InlineEdit {
+            id,
+            owner,
+            param,
+            draft: value,
+            anchor,
+            just_opened: true,
+        });
+    }
+
+    /// Center (scene coords, override-compensated) of `id` at the current
+    /// time — one-off eval, only paid when the inline editor opens.
+    fn scene_anchor_for(&self, id: &str) -> (f32, f32) {
+        if let Some(tl) = self.timeline.as_ref() {
+            if let Some(g) = Player::state_at(tl, self.current_time).get(id) {
+                let c = g.center();
+                let (odx, ody) = self.overrides.get(id).copied().unwrap_or((0.0, 0.0));
+                return (c.x + odx, c.y + ody);
+            }
+        }
+        (0.0, 0.0)
+    }
+
+    /// Persist the inline edit: rewrite the `param="..."` value on the decl
+    /// line in the owning file, then recompile (editor file → editor + dirty;
+    /// asset file → disk write, imports re-read).
+    fn apply_inline_edit(&mut self, edit: InlineEdit) {
+        if edit.draft.contains('"') {
+            self.set_status("Inline edit rejected: `\"` is not allowed in DSL string values");
+            return;
+        }
+        let owner_file = edit.owner.clone();
+        let code_src = match &owner_file {
+            Some(f) => std::fs::read_to_string(f).unwrap_or_default(),
+            None => self.editor_panel.code.clone(),
+        };
+        // The decl id inside the owning file (alias prefix stripped for assets).
+        let local_id = match &owner_file {
+            Some(f) => {
+                let base_dir = self.compile_base_dir();
+                let mut lid = edit.id.clone();
+                for line in self.editor_panel.code.lines() {
+                    let words: Vec<&str> = line.trim().split_whitespace().collect();
+                    if words.len() >= 4 && words[0] == "import" && words[2] == "as" {
+                        let prefix = format!("{}_", words[3].trim_end_matches(';'));
+                        if let Some(sub) = edit.id.strip_prefix(&prefix) {
+                            if base_dir.join(words[1].trim_matches('"')) == *f {
+                                lid = sub.to_string();
+                            }
+                        }
+                    }
+                }
+                lid
+            }
+            None => edit.id.clone(),
+        };
+        let Some((line_idx, _, _)) = find_string_decl(&code_src, &local_id, &[edit.param]) else {
+            self.set_status(format!("Could not locate {}= on '{}' to update", edit.param, local_id));
+            return;
+        };
+        let mut lines: Vec<String> = code_src.lines().map(|s| s.to_string()).collect();
+        let line = &mut lines[line_idx];
+        match string_param_span(line, edit.param) {
+            Some((s, e)) => line.replace_range(s..e, &edit.draft),
+            None => {
+                self.set_status("Inline edit failed: parameter span vanished");
+                return;
+            }
+        }
+        let mut new_code = lines.join("\n");
+        if code_src.ends_with('\n') {
+            new_code.push('\n');
+        }
+        match owner_file {
+            Some(f) => {
+                if std::fs::write(&f, &new_code).is_ok() {
+                    self.recompile();
+                    self.set_status(format!("Updated {} of '{}' in {}", edit.param, local_id, f.display()));
+                } else {
+                    self.set_status(format!("Failed to write {}", f.display()));
+                }
+            }
+            None => {
+                self.editor_panel.code = new_code;
+                self.editor_panel.is_dirty = true;
+                self.recompile();
+                self.set_status(format!("Updated {} of '{}'", edit.param, local_id));
             }
         }
     }
@@ -765,10 +904,12 @@ impl eframe::App for MathOxideApp {
         }
 
         // Global keyboard shortcuts. Playback / camera keys are gated on the
-        // editor NOT holding focus, so typing never triggers them.
+        // editor NOT holding focus and no inline edit being open, so typing
+        // never triggers them. Escape is handled below, ungated.
         let editor_focused = self.editor_panel.focus_held;
+        let inline_editing = self.inline_edit.is_some();
         ctx.input(|i| {
-            if !editor_focused {
+            if !editor_focused && !inline_editing {
                 if i.key_pressed(egui::Key::Space) {
                     self.timeline_panel.playing = !self.timeline_panel.playing;
                 }
@@ -822,12 +963,6 @@ impl eframe::App for MathOxideApp {
                         }
                     };
                 }
-                if i.key_pressed(egui::Key::Escape) && !i.modifiers.any() {
-                    if !self.selection.is_empty() {
-                        self.selection.clear();
-                        self.set_status("Deselected");
-                    }
-                }
                 if i.key_pressed(egui::Key::R) && !i.modifiers.any() {
                     self.camera.reset();
                     self.set_status("Camera reset to 2D default");
@@ -844,6 +979,15 @@ impl eframe::App for MathOxideApp {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::N) {
                 let name = self.asset_panel.new_asset_name.clone();
                 self.new_asset(&name);
+            }
+            // Escape is ungated: cancels the inline edit first, else deselects.
+            if i.key_pressed(egui::Key::Escape) && !i.modifiers.any() {
+                if self.inline_edit.take().is_some() {
+                    self.set_status("Inline edit cancelled");
+                } else if !self.selection.is_empty() && !editor_focused {
+                    self.selection.clear();
+                    self.set_status("Deselected");
+                }
             }
         });
 
@@ -1228,7 +1372,7 @@ impl eframe::App for MathOxideApp {
                             self.timeline_epoch,
                         );
                         let epoch = self.timeline_epoch;
-                        self.viewport_panel.show(
+                        let vp_action = self.viewport_panel.show(
                             ui,
                             &self.render_state,
                             &mut self.renderer,
@@ -1242,8 +1386,65 @@ impl eframe::App for MathOxideApp {
                             self.fps,
                             self.snap,
                         );
+                        if let Some(ViewportAction::EditSource(id)) = vp_action {
+                            self.open_inline_edit(id);
+                        }
                     });
             });
+
+        // Inline text/expr edit overlay, anchored above the edited object.
+        if self.inline_edit.is_some() {
+            let mut edit = self.inline_edit.take().unwrap();
+            let mut apply_now = false;
+            let canvas = self.viewport_panel.last_canvas_rect;
+            let cam = &self.viewport_panel.last_cam;
+            let p = cam.scene_to_screen(edit.anchor.0, edit.anchor.1);
+            let box_w = 380.0;
+            let mut bx = canvas.left() + p.x - box_w * 0.5;
+            let mut by = canvas.top() + p.y - 70.0;
+            if canvas.width() > box_w + 8.0 {
+                bx = bx.clamp(canvas.left() + 4.0, canvas.right() - box_w - 4.0);
+            }
+            by = by.max(canvas.top() + 4.0).min(canvas.bottom() - 70.0);
+            egui::Area::new(egui::Id::new("inline_edit_overlay"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(bx, by))
+                .show(ctx, |ui| {
+                    egui::Frame::window(ui.style()).show(ui, |ui| {
+                        ui.set_width(box_w);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(Color32::from_rgb(0xFF, 0xE0, 0x66), &edit.id);
+                            ui.label(
+                                egui::RichText::new(format!("{}=", edit.param))
+                                    .monospace()
+                                    .color(Color32::from_rgb(0x00, 0xD4, 0xFF)),
+                            );
+                        });
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut edit.draft)
+                                .desired_width(box_w - 16.0)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if edit.just_opened {
+                            resp.request_focus();
+                            edit.just_opened = false;
+                        }
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            apply_now = true;
+                        }
+                        ui.label(
+                            egui::RichText::new("Enter = apply · Esc = cancel")
+                                .size(10.0)
+                                .color(Color32::from_rgb(0x8A, 0x2B, 0xE2)),
+                        );
+                    });
+                });
+            if apply_now {
+                self.apply_inline_edit(edit);
+            } else {
+                self.inline_edit = Some(edit);
+            }
+        }
     }
 }
 
@@ -1345,6 +1546,36 @@ fn apply_shifts_to_dsl(code: &str, shifts: &[(String, f32, f32)]) -> (Option<Str
 
 fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<String> {
     apply_shifts_to_dsl(code, &[(target_id.to_string(), dx, dy)]).0
+}
+
+/// Byte span of a `param="..."` value's contents in a line. The DSL has no
+/// `\"` escapes — quotes terminate the value (LaTeX content is backslash-heavy).
+fn string_param_span(line: &str, param: &str) -> Option<(usize, usize)> {
+    let needle = format!("{param}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some((start, start + end))
+}
+
+/// Find the declaration line for `id` and whichever of `params` it carries.
+/// Returns (line index, param name, current value).
+fn find_string_decl<'a>(code: &str, id: &str, params: &[&'a str]) -> Option<(usize, &'a str, String)> {
+    for (i, line) in code.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        if words.len() >= 2 && words[1] == id {
+            for p in params {
+                if let Some((s, e)) = string_param_span(line, p) {
+                    return Some((i, p, line[s..e].to_string()));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Import base dir: the open file's folder (so `import "assets/x.moa"` works
@@ -1478,5 +1709,36 @@ mod tests {
         let (out, unapplied) = apply_shifts_to_dsl("circle c r=1;\n", &[("nope".to_string(), 1.0, 1.0)]);
         assert!(out.is_none());
         assert_eq!(unapplied, vec!["nope".to_string()]);
+    }
+
+    #[test]
+    fn test_string_param_span_finds_value() {
+        let line = r#"tex formula text="e^{i\pi} + 1 = 0" at (0, 0) size=1.5;"#;
+        let (s, e) = string_param_span(line, "text").unwrap();
+        assert_eq!(&line[s..e], r#"e^{i\pi} + 1 = 0"#);
+        assert!(string_param_span(line, "expr").is_none());
+    }
+
+    #[test]
+    fn test_find_string_decl_prefers_text_then_expr() {
+        let code = "circle c r=1;\nfunc wave on=ax expr=\"sin(2*x)\" from=-5;\n";
+        let (_, p, v) = find_string_decl(code, "wave", &["text", "expr"]).unwrap();
+        assert_eq!(p, "expr");
+        assert_eq!(v, "sin(2*x)");
+        assert!(find_string_decl(code, "missing", &["text", "expr"]).is_none());
+    }
+
+    #[test]
+    fn test_inline_edit_rewrite_round_trips_through_parser() {
+        let code = "tex formula text=\"e^{i\\\\pi} + 1 = 0\" at (0, 0);\nplay write(formula) 1s;\n";
+        let (line_idx, param, value) = find_string_decl(code, "formula", &["text", "expr"]).unwrap();
+        assert_eq!(param, "text");
+        let mut lines: Vec<String> = code.lines().map(|s| s.to_string()).collect();
+        let (s, e) = string_param_span(&lines[line_idx], param).unwrap();
+        lines[line_idx].replace_range(s..e, "e^{i\\\\pi}");
+        let new_code = lines.join("\n") + "\n";
+        assert!(new_code.contains("text=\"e^{i\\\\pi}\""));
+        assert!(mo_dsl::parse_or_report(&new_code).is_ok());
+        let _ = value;
     }
 }

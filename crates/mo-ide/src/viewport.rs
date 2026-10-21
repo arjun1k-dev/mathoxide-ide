@@ -6,8 +6,18 @@ use mo_core::scene::{Player, Timeline};
 use mo_render::Renderer;
 use std::collections::HashMap;
 
+/// Actions the viewport asks the app to perform.
+pub enum ViewportAction {
+    /// Double-clicked an object: open the inline text/expr editor for it.
+    EditSource(String),
+}
+
 pub struct ViewportPanel {
     pub texture_id: egui::TextureId,
+    /// Last frame's canvas rect + effective camera — lets the app anchor
+    /// overlays (inline edit box) to scene positions.
+    pub last_canvas_rect: Rect,
+    pub last_cam: Camera,
     last_cursor_pos: Option<Pos2>,
     is_dragging_mob: bool,
     is_panning: bool,
@@ -83,6 +93,8 @@ impl ViewportPanel {
 
         Self {
             texture_id,
+            last_canvas_rect: Rect::NOTHING,
+            last_cam: Camera::default(),
             last_cursor_pos: None,
             is_dragging_mob: false,
             is_panning: false,
@@ -109,7 +121,8 @@ impl ViewportPanel {
         timeline_epoch: u64,
         fps: f32,
         snap: Option<f32>,
-    ) {
+    ) -> Option<ViewportAction> {
+        let mut action: Option<ViewportAction> = None;
         let avail_size = ui.available_size();
         let padding = 12.0;
         let avail_w = (avail_size.x - padding * 2.0).max(160.0);
@@ -234,6 +247,10 @@ impl ViewportPanel {
             Vec2::new(canvas_w, canvas_h),
         );
 
+        // Overlay anchoring data for the app (inline edit box placement).
+        self.last_canvas_rect = canvas_rect;
+        self.last_cam = cam_owned.clone();
+
         // Register interaction response on canvas
         let response = ui.interact(canvas_rect, ui.id().with("viewport_canvas"), egui::Sense::click_and_drag());
         let painter = ui.painter_at(screen_rect);
@@ -291,7 +308,8 @@ impl ViewportPanel {
             }
 
             // Click handling: Shift+click toggles membership; plain click
-            // selects (or clears on empty space).
+            // selects (or clears on empty space). Double-click asks the app
+            // to open the inline text/expr editor for the hit object.
             if response.clicked() {
                 if let Some(hit) = hit_test(sc.x, sc.y) {
                     if ui.input(|i| i.modifiers.shift) {
@@ -305,6 +323,11 @@ impl ViewportPanel {
                     }
                 } else if !ui.input(|i| i.modifiers.shift) {
                     selection.clear();
+                }
+            }
+            if response.double_clicked() {
+                if let Some(hit) = hit_test(sc.x, sc.y) {
+                    action = Some(ViewportAction::EditSource(hit));
                 }
             }
 
@@ -518,5 +541,7 @@ impl ViewportPanel {
             egui::FontId::monospace(10.0),
             Color32::from_rgba_unmultiplied(150, 160, 180, 140),
         );
+
+        action
     }
 }
