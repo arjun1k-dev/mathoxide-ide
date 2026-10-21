@@ -14,10 +14,11 @@ pub enum ViewportAction {
 
 pub struct ViewportPanel {
     pub texture_id: egui::TextureId,
-    /// Last frame's canvas rect + effective camera — lets the app anchor
-    /// overlays (inline edit box) to scene positions.
+    /// Last frame's canvas rect + effective camera + canvas→target pixel
+    /// scale — lets the app anchor overlays (inline edit box) to scene pos.
     pub last_canvas_rect: Rect,
     pub last_cam: Camera,
+    pub last_px_scale: f32,
     last_cursor_pos: Option<Pos2>,
     is_dragging_mob: bool,
     is_panning: bool,
@@ -95,6 +96,7 @@ impl ViewportPanel {
             texture_id,
             last_canvas_rect: Rect::NOTHING,
             last_cam: Camera::default(),
+            last_px_scale: 1.0,
             last_cursor_pos: None,
             is_dragging_mob: false,
             is_panning: false,
@@ -121,6 +123,7 @@ impl ViewportPanel {
         timeline_epoch: u64,
         fps: f32,
         snap: Option<f32>,
+        playing: bool,
     ) -> Option<ViewportAction> {
         let mut action: Option<ViewportAction> = None;
         let avail_size = ui.available_size();
@@ -140,12 +143,17 @@ impl ViewportPanel {
             (w, h)
         };
 
-        let target_w = (canvas_w as u32).max(64);
-        let target_h = (canvas_h as u32).max(36);
+        // Fixed presentation target: full 1080p when paused/scrubbing (preview
+        // == final render pixels), auto half-res while playing or interacting
+        // to keep the iGPU fed. One resize + texture update per mode switch.
+        let interactive = playing || self.is_dragging_mob || self.is_orbiting || self.is_panning;
+        let (target_w, target_h) = if interactive { (960, 540) } else { (1920, 1080) };
 
-        // Keep camera dimensions in sync with viewport canvas
-        camera.width = canvas_w;
-        camera.height = canvas_h;
+        // Camera lives in target-pixel space; all screen↔scene conversions
+        // below go through canvas→target scaling.
+        let px_scale = target_w as f32 / canvas_w;
+        camera.width = target_w as f32;
+        camera.height = target_h as f32;
 
         // Resize renderer if viewport canvas size changed
         if renderer.width() != target_w || renderer.height() != target_h {
@@ -250,6 +258,7 @@ impl ViewportPanel {
         // Overlay anchoring data for the app (inline edit box placement).
         self.last_canvas_rect = canvas_rect;
         self.last_cam = cam_owned.clone();
+        self.last_px_scale = px_scale;
 
         // Register interaction response on canvas
         let response = ui.interact(canvas_rect, ui.id().with("viewport_canvas"), egui::Sense::click_and_drag());
@@ -298,7 +307,7 @@ impl ViewportPanel {
         if let Some(pos) = cursor_in_screen {
             let local_x = pos.x - canvas_rect.left();
             let local_y = pos.y - canvas_rect.top();
-            let sc = cam.screen_to_scene(local_x, local_y);
+            let sc = cam.screen_to_scene(local_x * px_scale, local_y * px_scale);
             cursor_scene_pos = Some(sc);
 
             // Zoom via mouse wheel
@@ -398,8 +407,11 @@ impl ViewportPanel {
                     // Orbit 3D camera
                     camera.orbit(-dy * 0.008, -dx * 0.008);
                 } else if self.is_panning {
-                    let p1 = camera.screen_to_scene(prev.x - canvas_rect.left(), prev.y - canvas_rect.top());
-                    let p2 = camera.screen_to_scene(local_x, local_y);
+                    let p1 = camera.screen_to_scene(
+                        (prev.x - canvas_rect.left()) * px_scale,
+                        (prev.y - canvas_rect.top()) * px_scale,
+                    );
+                    let p2 = camera.screen_to_scene(local_x * px_scale, local_y * px_scale);
                     camera.center.x -= p2.x - p1.x;
                     camera.center.y -= p2.y - p1.y;
                 } else if self.is_dragging_mob {
@@ -441,8 +453,14 @@ impl ViewportPanel {
             let p_min = cam.scene_to_screen(min[0], min[1]);
             let p_max = cam.scene_to_screen(max[0], max[1]);
 
-            let screen_min = Pos2::new(canvas_rect.left() + p_min.x, canvas_rect.top() + p_min.y);
-            let screen_max = Pos2::new(canvas_rect.left() + p_max.x, canvas_rect.top() + p_max.y);
+            let screen_min = Pos2::new(
+                canvas_rect.left() + p_min.x / px_scale,
+                canvas_rect.top() + p_min.y / px_scale,
+            );
+            let screen_max = Pos2::new(
+                canvas_rect.left() + p_max.x / px_scale,
+                canvas_rect.top() + p_max.y / px_scale,
+            );
 
             let box_rect = Rect::from_two_pos(screen_min, screen_max);
             let is_primary = primary.as_deref() == Some(id.as_str());

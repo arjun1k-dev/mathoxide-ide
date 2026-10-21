@@ -1400,6 +1400,7 @@ impl eframe::App for MathOxideApp {
                             epoch,
                             self.fps,
                             self.snap,
+                            self.timeline_panel.playing,
                         );
                         if let Some(ViewportAction::EditSource(id)) = vp_action {
                             self.open_inline_edit(id);
@@ -1413,10 +1414,11 @@ impl eframe::App for MathOxideApp {
             let mut apply_now = false;
             let canvas = self.viewport_panel.last_canvas_rect;
             let cam = &self.viewport_panel.last_cam;
+            let px_scale = self.viewport_panel.last_px_scale.max(1e-6);
             let p = cam.scene_to_screen(edit.anchor.0, edit.anchor.1);
             let box_w = 380.0;
-            let mut bx = canvas.left() + p.x - box_w * 0.5;
-            let mut by = canvas.top() + p.y - 70.0;
+            let mut bx = canvas.left() + p.x / px_scale - box_w * 0.5;
+            let mut by = canvas.top() + p.y / px_scale - 70.0;
             if canvas.width() > box_w + 8.0 {
                 bx = bx.clamp(canvas.left() + 4.0, canvas.right() - box_w - 4.0);
             }
