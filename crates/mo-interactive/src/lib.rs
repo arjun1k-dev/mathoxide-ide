@@ -35,6 +35,8 @@ struct App {
     memo: mo_core::FrameMemo,
     /// Timeline index — the timeline never changes after startup.
     index: mo_core::TimelineIndex,
+    /// Whether the timeline carries camera anims — t-invariant, computed once.
+    has_camera_anims: bool,
     /// Hash of the last presented frame's inputs; match = skip eval + GPU pass.
     last_draw_sig: Option<u64>,
 }
@@ -54,6 +56,18 @@ struct Overrides {
 impl App {
     fn new(timeline: Timeline) -> Self {
         let index = timeline.index();
+        let has_camera_anims = timeline.stmts.iter().any(|s| {
+            matches!(
+                s,
+                mo_core::scene::Stmt::Play(a)
+                if matches!(
+                    a.anim,
+                    mo_core::anim::Animation::CameraOrbit { .. }
+                        | mo_core::anim::Animation::CameraZoom { .. }
+                        | mo_core::anim::Animation::CameraMoveTo { .. }
+                )
+            )
+        });
         Self {
             timeline,
             window: None,
@@ -70,6 +84,7 @@ impl App {
             overrides: Overrides::default(),
             memo: mo_core::FrameMemo::new(16_384),
             index,
+            has_camera_anims,
             last_draw_sig: None,
         }
     }
@@ -118,7 +133,12 @@ impl App {
         let size = window.inner_size();
         let w = size.width.max(1);
         let h = size.height.max(1);
-        let cam = self.camera(w, h);
+        let cam = if self.has_camera_anims {
+            // Keyframed camera anims override the interactive base camera.
+            Player::camera_at(&self.timeline, self.time, &self.camera(w, h))
+        } else {
+            self.camera(w, h)
+        };
 
         // Skip eval + GPU pass when nothing visual changed (paused, idle).
         let mut hsh = std::collections::hash_map::DefaultHasher::new();
@@ -129,6 +149,10 @@ impl App {
         cam.center.x.to_bits().hash(&mut hsh);
         cam.center.y.to_bits().hash(&mut hsh);
         cam.frame_height.to_bits().hash(&mut hsh);
+        // Keyframed orbit angles change the frame without touching center/zoom.
+        cam.phi.to_bits().hash(&mut hsh);
+        cam.theta.to_bits().hash(&mut hsh);
+        cam.gamma.to_bits().hash(&mut hsh);
         let mut ov = 0u64;
         for (id, (dx, dy)) in &self.overrides.shifts {
             let mut eh = std::collections::hash_map::DefaultHasher::new();

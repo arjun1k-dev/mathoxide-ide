@@ -11,6 +11,15 @@ pub enum TimelineAction {
     Edited,
 }
 
+/// What the transport plays: the open file's own compiled timeline, or the
+/// active project's full master composition (shown when the open file is an
+/// asset of a project that has a master).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackScope {
+    ThisFile,
+    FullMaster,
+}
+
 /// Min duration a play block can be trimmed to, in seconds.
 const MIN_RUN: f32 = 0.1;
 /// Half-width of the right-edge grab zone, in pixels.
@@ -40,6 +49,7 @@ pub struct TimelinePanel {
     pub playing: bool,
     pub looping: bool,
     pub speed: f32,
+    pub scope: PlaybackScope,
     drag: Option<TrackDrag>,
 }
 
@@ -49,6 +59,7 @@ impl Default for TimelinePanel {
             playing: false,
             looping: true,
             speed: 1.0,
+            scope: PlaybackScope::ThisFile,
             drag: None,
         }
     }
@@ -72,6 +83,7 @@ impl TimelinePanel {
         timeline: Option<&mut Timeline>,
         origins: &[mo_dsl::PlayOrigin],
         current_time: &mut f32,
+        master_available: bool,
     ) -> Option<TimelineAction> {
         let mut action = None;
         let tl = timeline?;
@@ -102,6 +114,25 @@ impl TimelinePanel {
             }
 
             ui.checkbox(&mut self.looping, "Loop");
+
+            // Playback scope: the open asset's own timeline vs the full master.
+            if master_available {
+                ui.separator();
+                if ui
+                    .selectable_label(self.scope == PlaybackScope::ThisFile, "This file")
+                    .on_hover_text("Play the open file's own timeline")
+                    .clicked()
+                {
+                    self.scope = PlaybackScope::ThisFile;
+                }
+                if ui
+                    .selectable_label(self.scope == PlaybackScope::FullMaster, "Full master")
+                    .on_hover_text("Play the project's full master composition while this asset stays open in the editor")
+                    .clicked()
+                {
+                    self.scope = PlaybackScope::FullMaster;
+                }
+            }
 
             ui.separator();
 

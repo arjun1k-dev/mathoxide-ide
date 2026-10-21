@@ -2,7 +2,7 @@ use crate::assets::{AssetAction, AssetPanel};
 use crate::editor::EditorPanel;
 use crate::export::{export_moab, export_mp4};
 use crate::inspector::{InspectorAction, InspectorPanel};
-use crate::timeline::TimelinePanel;
+use crate::timeline::{PlaybackScope, TimelinePanel};
 use crate::viewport::ViewportPanel;
 use crate::watcher::FileWatcher;
 use crate::ext::eframe;
@@ -28,6 +28,11 @@ pub struct MathOxideApp {
 
     timeline: Option<Timeline>,
     play_origins: Vec<mo_dsl::PlayOrigin>,
+    /// Compiled master for the `Full master` playback scope, cached per
+    /// (path, mtime): (master path, mtime, timeline, play origins). Rebuilt
+    /// lazily by `sync_master_scope` when stale; the editor keeps showing the
+    /// open asset while the composition timeline drives playback.
+    master_scope: Option<(PathBuf, std::time::SystemTime, Timeline, Vec<mo_dsl::PlayOrigin>)>,
     /// Bumped on every timeline replacement (recompile, import, open file);
     /// invalidates the state cache and viewport frame signature.
     timeline_epoch: u64,
@@ -137,6 +142,7 @@ impl MathOxideApp {
             watcher,
             timeline,
             play_origins,
+            master_scope: None,
             timeline_epoch: 0,
             frame_memo: mo_core::FrameMemo::new(16_384),
             index_cache: None,
@@ -168,6 +174,132 @@ impl MathOxideApp {
         self.timeline = tl;
     }
 
+    /// Master path for the Full-master scope: the active project's master,
+    /// when the open file isn't that master itself.
+    fn scope_master_path(&self) -> Option<PathBuf> {
+        let proj = self.asset_panel.active_project.clone()?;
+        let master = proj.join("master.moa");
+        if !master.exists() || self.file_path.as_deref() == Some(master.as_path()) {
+            return None;
+        }
+        Some(master)
+    }
+
+    fn full_master_active(&self) -> bool {
+        self.timeline_panel.scope == PlaybackScope::FullMaster && self.master_scope.is_some()
+    }
+
+    /// Duration of whichever timeline the transport is scoped to.
+    fn active_duration(&self) -> Option<f32> {
+        if self.full_master_active() {
+            self.master_scope.as_ref().map(|(_, _, tl, _)| tl.duration())
+        } else {
+            self.timeline.as_ref().map(|tl| tl.duration())
+        }
+    }
+
+    /// Rebuild the master-scope cache when stale (missing, path changed, or
+    /// master.moa mtime moved). Reverts the scope if the master won't compile.
+    fn sync_master_scope(&mut self) {
+        if self.timeline_panel.scope != PlaybackScope::FullMaster {
+            return;
+        }
+        let Some(master) = self.scope_master_path() else {
+            self.timeline_panel.scope = PlaybackScope::ThisFile;
+            self.master_scope = None;
+            return;
+        };
+        let mtime = std::fs::metadata(&master).and_then(|m| m.modified()).ok();
+        let fresh = matches!(
+            (&self.master_scope, &mtime),
+            (Some((p, t, _, _)), Some(m)) if p == &master && t == m
+        );
+        if fresh {
+            return;
+        }
+        let dir = master.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        match std::fs::read_to_string(&master)
+            .map_err(|e| e.to_string())
+            .and_then(|code| {
+                mo_dsl::parse_with_origins_in(&code, &dir)
+                    .map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join(", "))
+            }) {
+            Ok((tl, origins)) => {
+                self.master_scope = Some((
+                    master,
+                    mtime.unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    tl,
+                    origins,
+                ));
+            }
+            Err(e) => {
+                self.timeline_panel.scope = PlaybackScope::ThisFile;
+                self.master_scope = None;
+                self.set_status(format!("Full master scope unavailable: {e}"));
+            }
+        }
+    }
+
+    /// Apply drag-edited run times to the master composition (cross-file,
+    /// exactly like the normal path but against the scope's master, writing
+    /// the master file + touched asset files to disk).
+    fn apply_timings_master_scope(&mut self, run_times: Vec<f32>) {
+        let Some((master, _, _, origins)) = &self.master_scope else {
+            return;
+        };
+        if origins.len() != run_times.len() {
+            self.set_status("Cannot apply: run times and plays out of sync — recompile first");
+            return;
+        }
+        let master = master.clone();
+        let dir = master.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let Ok(code) = std::fs::read_to_string(&master) else {
+            self.set_status("Cannot apply: master.moa unreadable");
+            return;
+        };
+        let Ok((_, origins)) = mo_dsl::parse_with_origins_in(&code, &dir) else {
+            self.set_status("Cannot apply: master.moa failed to re-parse");
+            return;
+        };
+        if origins.len() != run_times.len() {
+            self.set_status("Cannot apply: run times and plays out of sync — recompile first");
+            return;
+        }
+        match crate::timeline::apply_timings_multi(&code, &origins, &run_times) {
+            Some((new_code, asset_writes)) => {
+                let mut written = 0;
+                for (path, content) in &asset_writes {
+                    if std::fs::write(path, content).is_ok() {
+                        written += 1;
+                    }
+                }
+                if std::fs::write(&master, &new_code).is_ok() {
+                    // Rebuild the scope cache from the written source (mtime
+                    // granularity is too coarse to rely on here).
+                    if let Ok((tl, origins)) = mo_dsl::parse_with_origins_in(&new_code, &dir) {
+                        let mtime = std::fs::metadata(&master)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        self.master_scope = Some((master, mtime, tl, origins));
+                    }
+                    if written > 0 {
+                        self.set_status(format!(
+                            "Timings applied to master composition: master + {written} asset file(s) updated"
+                        ));
+                    } else {
+                        self.set_status("Timeline timings written to master composition");
+                    }
+                } else {
+                    self.set_status("Apply failed: could not write master.moa");
+                }
+            }
+            None => {
+                self.set_status("Apply failed: could not read/rewrite an imported asset file");
+            }
+        }
+    }
+
     /// Full DSL reparse (incl. imports from disk) + error surfacing.
     fn recompile(&mut self) {
         let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
@@ -185,7 +317,7 @@ impl MathOxideApp {
     fn eval_state_cached<'a>(
         memo: &'a mut mo_core::FrameMemo,
         index_cache: &'a mut Option<(u64, mo_core::TimelineIndex)>,
-        timeline: &'a Option<Timeline>,
+        timeline: Option<&'a Timeline>,
         time: f32,
         epoch: u64,
     ) -> &'a HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>> {
@@ -221,7 +353,21 @@ impl MathOxideApp {
             } else {
                 self.watcher = FileWatcher::new(&path).ok();
             }
-            self.set_status(format!("Opened {}", path.display()));
+            // Solo-preview hint for project assets that carry their own plays.
+            let is_project_asset = self
+                .asset_panel
+                .active_project
+                .as_ref()
+                .map(|p| path.starts_with(p) && path != p.join("master.moa"))
+                .unwrap_or(false);
+            if is_project_asset && content.contains("play ") {
+                self.set_status(format!(
+                    "Opened {} — solo preview; timeline scope 'Full master' plays the composition",
+                    path.display()
+                ));
+            } else {
+                self.set_status(format!("Opened {}", path.display()));
+            }
         } else {
             self.set_status(format!("Failed to read {}", path.display()));
         }
@@ -485,10 +631,12 @@ impl eframe::App for MathOxideApp {
             }
         }
 
+        // Keep the master-scope cache fresh before anything samples it.
+        self.sync_master_scope();
+
         // Advance timeline playback if playing
         if self.timeline_panel.playing {
-            if let Some(tl) = &self.timeline {
-                let dur = tl.duration();
+            if let Some(dur) = self.active_duration() {
                 self.current_time += dt * self.timeline_panel.speed;
                 if self.current_time > dur {
                     if self.timeline_panel.looping {
@@ -515,7 +663,7 @@ impl eframe::App for MathOxideApp {
                 }
                 if i.key_pressed(egui::Key::ArrowRight) {
                     self.timeline_panel.playing = false;
-                    let dur = self.timeline.as_ref().map(|t| t.duration()).unwrap_or(0.0);
+                    let dur = self.active_duration().unwrap_or(0.0);
                     self.current_time = (self.current_time + 1.0 / 60.0).min(dur);
                 }
                 if i.key_pressed(egui::Key::ArrowLeft) {
@@ -579,8 +727,12 @@ impl eframe::App for MathOxideApp {
                     }
                     ui.separator();
                     if ui.button("Export MP4 Video...").clicked() {
-                        if let Some(tl) = &self.timeline {
-                            let tl_clone = tl.clone();
+                        let export_tl = if self.full_master_active() {
+                            self.master_scope.as_ref().map(|(_, _, tl, _)| tl.clone())
+                        } else {
+                            self.timeline.clone()
+                        };
+                        if let Some(tl_clone) = export_tl {
                             let default_name = self.active_project_name().unwrap_or_else(|| "render".into());
                             if let Some(out_path) = rfd::FileDialog::new()
                                 .add_filter("MP4 Video", &["mp4"])
@@ -676,19 +828,52 @@ impl eframe::App for MathOxideApp {
             .exact_height(180.0)
             .resizable(false)
             .show(ctx, |ui| {
+                let full_master = self.full_master_active();
+                let master_available = self.scope_master_path().is_some();
+                let scope_before = self.timeline_panel.scope;
+                // Scope-aware borrows: drag edits mutate the master-scope
+                // timeline in memory; Apply Timings persists cross-file.
+                let (tl_mut, origins_ref): (Option<&mut Timeline>, &[mo_dsl::PlayOrigin]) =
+                    if full_master {
+                        let (_, _, tl, org) = self.master_scope.as_mut().unwrap();
+                        (Some(tl), org.as_slice())
+                    } else {
+                        (self.timeline.as_mut(), self.play_origins.as_slice())
+                    };
                 let mut panel = std::mem::take(&mut self.timeline_panel);
                 let tl_action = panel.show(
                     ui,
-                    self.timeline.as_mut(),
-                    &self.play_origins,
+                    tl_mut,
+                    origins_ref,
                     &mut self.current_time,
+                    master_available,
                 );
+                let scope_changed = panel.scope != scope_before;
                 self.timeline_panel = panel;
+                if scope_changed {
+                    match self.timeline_panel.scope {
+                        PlaybackScope::FullMaster => {
+                            self.current_time = 0.0;
+                            self.set_status("Scope: Full master — playback follows the composition");
+                        }
+                        PlaybackScope::ThisFile => {
+                            self.current_time = 0.0;
+                            self.set_status("Scope: this file's own timeline");
+                        }
+                    }
+                }
                 match tl_action {
                     Some(crate::timeline::TimelineAction::Edited) => {
-                        self.editor_panel.is_dirty = true;
+                        if full_master {
+                            self.set_status("Master timeline dragged — 💾 Apply Timings to persist");
+                        } else {
+                            self.editor_panel.is_dirty = true;
+                        }
                     }
                     Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
+                        if full_master {
+                            self.apply_timings_master_scope(run_times);
+                        } else {
                         match mo_dsl::parse_with_origins_in(&self.editor_panel.code, &self.compile_base_dir()) {
                             Ok((_, origins))
                                 if origins.len() == run_times.len() =>
@@ -730,6 +915,7 @@ impl eframe::App for MathOxideApp {
                                 self.set_status("Cannot apply: run times and plays out of sync — recompile first");
                             }
                         }
+                        }
                     }
                     None => {}
                 }
@@ -745,6 +931,12 @@ impl eframe::App for MathOxideApp {
                     AssetAction::Open(path) => {
                         eprintln!("[app] opening: {}", path.display());
                         self.open_file(path);
+                    }
+                    AssetAction::PreviewFile(path) => {
+                        self.open_file(path.clone());
+                        if self.timeline.is_some() {
+                            self.timeline_panel.playing = true;
+                        }
                     }
                     AssetAction::InsertImport { path, alias } => {
                         let stmt = format!("import \"{path}\" as {alias} at (0, 0);");
@@ -835,16 +1027,21 @@ impl eframe::App for MathOxideApp {
                     .exact_height(300.0)
                     .resizable(false)
                     .show_inside(ui, |ui| {
+                        let timeline_ref: Option<&Timeline> = if self.full_master_active() {
+                            self.master_scope.as_ref().map(|(_, _, tl, _)| tl)
+                        } else {
+                            self.timeline.as_ref()
+                        };
                         let current_state = Self::eval_state_cached(
                             &mut self.frame_memo,
                             &mut self.index_cache,
-                            &self.timeline,
+                            timeline_ref,
                             self.current_time,
                             self.timeline_epoch,
                         );
                         let inspector_action = InspectorPanel::show(
                             ui,
-                            self.timeline.as_ref(),
+                            timeline_ref,
                             current_state,
                             &mut self.selected_mobject,
                             &mut self.overrides,
@@ -912,10 +1109,15 @@ impl eframe::App for MathOxideApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(Color32::from_rgb(0x05, 0x00, 0x1A)))
                     .show_inside(ui, |ui| {
+                        let timeline_ref: Option<&Timeline> = if self.full_master_active() {
+                            self.master_scope.as_ref().map(|(_, _, tl, _)| tl)
+                        } else {
+                            self.timeline.as_ref()
+                        };
                         let base_state = Self::eval_state_cached(
                             &mut self.frame_memo,
                             &mut self.index_cache,
-                            &self.timeline,
+                            timeline_ref,
                             self.current_time,
                             self.timeline_epoch,
                         );
@@ -924,7 +1126,7 @@ impl eframe::App for MathOxideApp {
                             ui,
                             &self.render_state,
                             &mut self.renderer,
-                            self.timeline.as_ref(),
+                            timeline_ref,
                             self.current_time,
                             &mut self.camera,
                             &mut self.selected_mobject,

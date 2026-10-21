@@ -63,6 +63,8 @@ pub struct ProjectEntry {
 pub enum AssetAction {
     None,
     Open(PathBuf),
+    /// Open the file AND immediately play it (solo asset preview).
+    PreviewFile(PathBuf),
     InsertImport { path: String, alias: String },
     NewAsset { name: String },
     NewVideo,
@@ -414,10 +416,21 @@ impl AssetPanel {
                             if btn.clicked() {
                                 action = AssetAction::Open(entry.path.clone());
                             }
+                            if ui
+                                .button("▶")
+                                .on_hover_text("Preview solo — opens this asset and plays its own animations")
+                                .clicked()
+                            {
+                                action = AssetAction::PreviewFile(entry.path.clone());
+                            }
                         });
                         row.response.context_menu(|ui| {
                             if ui.button("Open").clicked() {
                                 action = AssetAction::Open(entry.path.clone());
+                                ui.close_menu();
+                            }
+                            if ui.button("▶ Preview solo").clicked() {
+                                action = AssetAction::PreviewFile(entry.path.clone());
                                 ui.close_menu();
                             }
                             if ui.button("➕ Insert import into script").clicked() {
@@ -452,10 +465,21 @@ impl AssetPanel {
                             if btn.clicked() {
                                 action = AssetAction::Open(entry.path.clone());
                             }
+                            if ui
+                                .button("▶")
+                                .on_hover_text("Preview solo — opens this file and plays its own animations")
+                                .clicked()
+                            {
+                                action = AssetAction::PreviewFile(entry.path.clone());
+                            }
                         });
                         row.response.context_menu(|ui| {
                             if ui.button("Open").clicked() {
                                 action = AssetAction::Open(entry.path.clone());
+                                ui.close_menu();
+                            }
+                            if ui.button("▶ Preview solo").clicked() {
+                                action = AssetAction::PreviewFile(entry.path.clone());
                                 ui.close_menu();
                             }
                             ui.separator();
