@@ -17,7 +17,8 @@
 [CLI Tool](#-cli-tool-mo) •
 [MCP Server](#-mcp-ai-agent-integration) •
 [Installation](#-getting-started) •
-[Attribution & Legal](#-license--attribution)
+[Homage to 3b1b](#-homage--tribute-to-3blue1brown-grant-sanderson) •
+[License](#-license--attribution)
 
 </div>
 
@@ -238,6 +239,22 @@ cargo test --workspace
 # Launch the Visual Studio Studio IDE
 cargo run -p mo-ide --release
 ```
+
+---
+
+## 💙 Homage & Tribute to 3Blue1Brown (Grant Sanderson)
+
+> *"Some of the most profound ideas in mathematics are visually intuitive when shown the right way."*
+
+This entire project owes its existence and heartbeat to **Grant Sanderson ([3Blue1Brown](https://www.youtube.com/@3blue1brown))**.
+
+Before 3Blue1Brown, mathematics often felt to so many of us like a wall of dry formulas, rigid mechanical procedures, and impenetrable abstraction. Grant changed everything. Through his peerless pedagogical genius, serene storytelling, and profound geometric intuition—from the groundbreaking *Essence of Linear Algebra* and *Essence of Calculus* series, to mind-bending explorations of neural networks, Fourier transforms, differential equations, and quaternions—he did something rare and extraordinary: **he made us fall in love with mathematics.** He revealed the living, breathing beauty behind the symbols.
+
+Watching Grant's videos was the singular catalyst that ignited my passion for mathematics, transformed the way I understand abstract structures, and planted the spark of inspiration to create MathOxide. The visual language he invented through Manim didn't just illustrate concepts; it fundamentally transformed how mathematical ideas are visualized and communicated across the globe.
+
+**MathOxide is, at its core, a love letter to that vision.** It is a heartfelt attempt to take the aesthetic elegance and animation philosophy Grant gifted to the world and rebuild it in the compiled, ultra-high-performance realm of pure Rust and WebGPU—bringing real-time 60 FPS interactivity, instant timeline scrubbing, and zero-setup tooling to mathematical creators everywhere.
+
+To Grant: **Thank you.** Thank you for inspiring millions of minds, for demystifying the infinite, and for showing the world that mathematics is not just a calculation, but one of humanity's highest forms of art. MathOxide exists because of you.
 
 ---
 
