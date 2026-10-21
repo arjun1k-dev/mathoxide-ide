@@ -157,17 +157,39 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
 22. **Timeline replacement must bump `timeline_epoch`** — in mo-ide always assign via `self.set_timeline(...)` (never `self.timeline = ...` directly) or the state cache / viewport frame signature will serve stale frames.
 23. **Staging-ring uploads precede the render pass**: `draw_scene_pass` resolves cache hits/uploads *before* `begin_render_pass` because the pass borrows the encoder exclusively (`stage_copy` needs `&mut encoder`). Don't move uploads back inside the draw loop. Misses that overflow the 16 MB ring fall back to direct `queue.write_buffer` — correct, just unpooled.
 24. **Override-shift cache keys on base `Arc::as_ptr`** (viewport `shift_cache`): the entry keeps its base `Arc<VGroup>` alive, which is what makes the pointer identity sound — never store a raw pointer key without keeping the owner alive. Cleared on timeline epoch and capped (~128) against playback-drag growth.
+25. **Timeline dock + scope**: the track area lives in a vertical ScrollArea (`drag_to_scroll(false)` — the painter's click_and_drag owns block move/trim/seek); no track cap; dock is fixed 180px. `TimelinePanel.scope` (ThisFile/FullMaster) is backed by `MathOxideApp.master_scope` (master path + mtime + compiled timeline + origins, rebuilt by `sync_master_scope`); in FullMaster scope playback/scrub/inspector/viewport/Apply-Timings all use the master timeline while the editor keeps the open asset. `TrackDrag` holds stmt indices — scroll-safe.
+26. **Selection is a Vec, not Option**: `MathOxideApp.selection` (pick order, last = primary for Inspector). Viewport group drag captures per-id grab points (`ViewportPanel::group_grab`); overrides stay per-id in one map. Persistence is batched: `apply_shifts_to_dsl` rewrites all master-owned ids in one pass; alias-prefixed leftovers group per asset file (read/rewrite/write once each); a single recompile follows. `apply_shift_to_dsl` is now a `#[cfg(test)]` 1-element wrapper.
+27. **Inline edit contract**: viewport double-click emits `ViewportAction::EditSource(id)`; the app locates the decl via `find_string_decl` (open file first, then imported asset files via alias prefix) and edits `text=`/`expr=` values through `string_param_span` (quote-terminates; the DSL has no `\"` escapes). Global shortcuts are gated on `!editor_focused && inline_edit.is_none()`; **Escape is ungated** (cancels edit → deselects). Overlay placement uses `ViewportPanel::last_canvas_rect` + `last_cam` (updated every `show()`).
+28. **Asset solo playback is real**: the parser flattens imported asset plays into master at the import position (pixel-verified on master-showcase), and the IDE can play any file standalone (open it, or the Explorer `▶` button). "Assets don't play" reports should first be repro'd with `mo render --frame` before suspecting the engine.
+29. **mo preview camera anims**: mo-interactive computes `has_camera_anims` once and routes through `Player::camera_at`; the draw signature hashes `phi/theta/gamma` — when adding camera-affecting state, extend that hash or keyframed moves get frozen by the skip-render path.
 
 ---
 
 ## 8. Direction & Roadmap — Next Up
 
 1. **Directional lighting / normal-based shading** for filled `surface3d`.
-2. **Camera anims in `mo preview`** (winit).
-3. **Undo/redo** in the IDE (code edits, explorer rename/delete, apply-to-code round-trips).
-4. **`.mcp.json` + agent loop hardening**: `assemble_scene` should use `parse_with_origins`; consider an MCP `apply_timings` tool.
-5. **CLI `render` of a project folder** (`mo render ~/mathoxide/foo` → `foo/master.moa`).
-6. **Polish candidates from this session**: hover docs for user symbols (object ids with their param list); go-to-def style click on import aliases; error squiggles per line instead of the top error bar.
+2. **Fixed 1080p IDE viewport target** (half-res during playback/drag) so preview pixels match export; camera in target-pixel space with canvas↔target scale helpers.
+3. **Undo/redo** in the IDE (code edits, explorer rename/delete, apply-to-code round-trips) — prerequisite for a Delete-object keybind.
+4. **Marquee rubber-band select** behind a tool mode (would need to take empty-drag pan).
+5. **`.mcp.json` + agent loop hardening**: `assemble_scene` should use `parse_with_origins`; consider an MCP `apply_timings` tool.
+6. **CLI `render` of a project folder** (`mo render ~/mathoxide/foo` → `foo/master.moa`).
+7. **Video-editor polish**: onion skin, timeline markers + loop in/out region, timecode (HH:MM:SS:FF), audio track (rodio behind a façade module), keyframe easing-graph editor, autosave, render-range export, copy/paste objects, error squiggles per line + go-to-def on import aliases, hover docs for user symbols.
+
+### Strict keybind table (IDE; single-key gated on editor unfocused + no inline edit)
+| Key | Action |
+|---|---|
+| Space | play / pause |
+| ← / → | nudge selection 0.1 (no selection: step ±1 frame) |
+| Shift+← / → | nudge 1.0 (no selection: step ±10 frames) |
+| ↑ / ↓ | nudge selection vertically |
+| Home / End | jump to start / end |
+| R | reset camera |
+| G | toggle grid snap (0.25) |
+| Esc | cancel inline edit / deselect |
+| Double-click | inline edit text/expr of object |
+| Shift+click | toggle object in selection |
+| Ctrl+S / ⇧Ctrl+S | save / save as |
+| Ctrl+O / Ctrl+N | open file / new asset |
 
 ### Instructions for Future Agents
 * **Hardware**: 16 GB RAM (use freely), iGPU ~128 MB VRAM (keep per-frame GPU uploads bounded).

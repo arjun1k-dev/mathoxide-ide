@@ -1081,6 +1081,21 @@ impl eframe::App for MathOxideApp {
                         self.camera.reset();
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.menu_button("Shortcuts", |ui| {
+                        ui.monospace("Space            play / pause");
+                        ui.monospace("← / →            nudge selection 0.1 (no selection: step 1 frame)");
+                        ui.monospace("Shift+← / →      nudge 1.0 (no selection: step 10 frames)");
+                        ui.monospace("↑ / ↓            nudge selection vertically");
+                        ui.monospace("Home / End       jump to start / end");
+                        ui.monospace("R                reset camera");
+                        ui.monospace("G                toggle grid snap (0.25)");
+                        ui.monospace("Esc              cancel edit / deselect");
+                        ui.monospace("Double-click     inline edit text/expr of object");
+                        ui.monospace("Shift+click      add/remove from selection");
+                        ui.monospace("Ctrl+S / ⇧Ctrl+S save / save as");
+                        ui.monospace("Ctrl+O / Ctrl+N  open file / new asset");
+                    });
                 });
 
                 ui.menu_button("Examples", |ui| {
@@ -1544,6 +1559,8 @@ fn apply_shifts_to_dsl(code: &str, shifts: &[(String, f32, f32)]) -> (Option<Str
     (out, pending.into_keys().collect())
 }
 
+/// Single-id convenience wrapper — kept for tests of the legacy signature.
+#[cfg(test)]
 fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<String> {
     apply_shifts_to_dsl(code, &[(target_id.to_string(), dx, dy)]).0
 }
