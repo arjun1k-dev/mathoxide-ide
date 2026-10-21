@@ -44,7 +44,11 @@ pub struct MathOxideApp {
     index_cache: Option<(u64, mo_core::TimelineIndex)>,
     camera: Camera,
     current_time: f32,
-    selected_mobject: Option<String>,
+    /// Viewport multi-selection, in pick order (last = primary for the
+    /// Inspector). Group drag/nudge moves every member.
+    selection: Vec<String>,
+    /// Grid snap quantum for drags/nudges (None = off; G toggles 0.25).
+    snap: Option<f32>,
     overrides: HashMap<String, (f32, f32)>,
 
 
@@ -148,7 +152,8 @@ impl MathOxideApp {
             index_cache: None,
             camera,
             current_time: 0.0,
-            selected_mobject: None,
+            selection: Vec::new(),
+            snap: None,
             overrides: HashMap::new(),
             last_frame_instant: Instant::now(),
             fps: 60.0,
@@ -195,6 +200,21 @@ impl MathOxideApp {
             self.master_scope.as_ref().map(|(_, _, tl, _)| tl.duration())
         } else {
             self.timeline.as_ref().map(|tl| tl.duration())
+        }
+    }
+
+    /// Nudge every selected object by (dx, dy) scene units as a pending
+    /// override (same persistence path as viewport drags); snap-quantized.
+    fn nudge_selection(&mut self, dx: f32, dy: f32) {
+        let ids = self.selection.clone();
+        for id in ids {
+            let e = self.overrides.entry(id).or_insert((0.0, 0.0));
+            e.0 += dx;
+            e.1 += dy;
+            if let Some(q) = self.snap.filter(|q| *q > 0.0) {
+                e.0 = (e.0 / q).round() * q;
+                e.1 = (e.1 / q).round() * q;
+            }
         }
     }
 
@@ -560,6 +580,100 @@ impl MathOxideApp {
             .unwrap_or_else(crate::assets::src_home)
     }
 
+    /// Persist position overrides back into source, batched: master-owned ids
+    /// in one rewrite pass, `alias_`-prefixed ids grouped per asset file
+    /// (read once, rewrite once, write once), then a single recompile.
+    fn apply_shifts_to_source(&mut self, shifts: Vec<(String, f32, f32)>) {
+        let (updated, mut unapplied) = apply_shifts_to_dsl(&self.editor_panel.code, &shifts);
+        if let Some(new_code) = updated {
+            for (id, _, _) in shifts.iter().filter(|(id, _, _)| !unapplied.contains(id)) {
+                self.overrides.remove(id);
+            }
+            self.editor_panel.code = new_code;
+            let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
+            self.play_origins = origins;
+            if let Some(t) = tl {
+                self.set_timeline(Some(t));
+            }
+            self.editor_panel.set_error(err);
+            self.editor_panel.is_dirty = true;
+        }
+
+        // Cross-file fallback: group remaining ids by owning asset file via
+        // the import header (alias → rel path); each file is read once,
+        // rewritten once, written once.
+        if !unapplied.is_empty() {
+            let base_dir = self.compile_base_dir();
+            // (asset file, aliased id, sub id, dx, dy)
+            let mut per_file: HashMap<PathBuf, Vec<(String, String, f32, f32)>> = HashMap::new();
+            for line in self.editor_panel.code.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with("import") {
+                    continue;
+                }
+                let words: Vec<&str> = trimmed.split_whitespace().collect();
+                if words.len() >= 4 && words[0] == "import" && words[2] == "as" {
+                    let rel_path = words[1].trim_matches('"');
+                    let alias = words[3].trim_end_matches(';');
+                    let prefix = format!("{alias}_");
+                    let asset_file = base_dir.join(rel_path);
+                    for (id, dx, dy) in shifts.iter() {
+                        if let Some(sub_id) = id.strip_prefix(&prefix) {
+                            if unapplied.contains(id) {
+                                per_file.entry(asset_file.clone()).or_default().push((
+                                    id.clone(),
+                                    sub_id.to_string(),
+                                    *dx,
+                                    *dy,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut written_files = 0;
+            let mut applied_ids: Vec<String> = Vec::new();
+            for (asset_file, entries) in per_file {
+                let Ok(asset_code) = std::fs::read_to_string(&asset_file) else {
+                    continue;
+                };
+                let sub_shifts: Vec<(String, f32, f32)> = entries
+                    .iter()
+                    .map(|(_, sub, dx, dy)| (sub.clone(), *dx, *dy))
+                    .collect();
+                if let Some(new_asset_code) = apply_shifts_to_dsl(&asset_code, &sub_shifts).0 {
+                    if std::fs::write(&asset_file, new_asset_code).is_ok() {
+                        written_files += 1;
+                        for (aliased, _, _, _) in &entries {
+                            applied_ids.push(aliased.clone());
+                        }
+                    }
+                }
+            }
+            for id in &applied_ids {
+                self.overrides.remove(id);
+                unapplied.retain(|u| u != id);
+            }
+            if written_files > 0 {
+                let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
+                self.play_origins = origins;
+                if let Some(t) = tl {
+                    self.set_timeline(Some(t));
+                }
+                self.editor_panel.set_error(err);
+            }
+        }
+
+        if unapplied.is_empty() {
+            self.set_status("Applied position(s) to source");
+        } else {
+            self.set_status(format!(
+                "Could not apply shift for: {}",
+                unapplied.join(", ")
+            ));
+        }
+    }
+
     pub fn new_asset(&mut self, raw_name: &str) {
         let name: String = raw_name
             .trim()
@@ -661,14 +775,58 @@ impl eframe::App for MathOxideApp {
                 if i.key_pressed(egui::Key::Home) {
                     self.current_time = 0.0;
                 }
+                if i.key_pressed(egui::Key::End) {
+                    self.timeline_panel.playing = false;
+                    self.current_time = self.active_duration().unwrap_or(0.0);
+                }
+                // Arrows are context-dependent: with a selection they nudge
+                // the selected objects (Shift = 1.0 world units); with none
+                // they step the playhead (Shift = 10 frames).
+                let arrow_step = if i.modifiers.shift { 1.0 } else { 0.1 };
                 if i.key_pressed(egui::Key::ArrowRight) {
                     self.timeline_panel.playing = false;
-                    let dur = self.active_duration().unwrap_or(0.0);
-                    self.current_time = (self.current_time + 1.0 / 60.0).min(dur);
+                    if !self.selection.is_empty() {
+                        self.nudge_selection(arrow_step, 0.0);
+                    } else {
+                        let frames = if i.modifiers.shift { 10.0 } else { 1.0 } / 60.0;
+                        let dur = self.active_duration().unwrap_or(0.0);
+                        self.current_time = (self.current_time + frames).min(dur);
+                    }
                 }
                 if i.key_pressed(egui::Key::ArrowLeft) {
                     self.timeline_panel.playing = false;
-                    self.current_time = (self.current_time - 1.0 / 60.0).max(0.0);
+                    if !self.selection.is_empty() {
+                        self.nudge_selection(-arrow_step, 0.0);
+                    } else {
+                        let frames = if i.modifiers.shift { 10.0 } else { 1.0 } / 60.0;
+                        self.current_time = (self.current_time - frames).max(0.0);
+                    }
+                }
+                if i.key_pressed(egui::Key::ArrowUp) && !self.selection.is_empty() {
+                    self.timeline_panel.playing = false;
+                    self.nudge_selection(0.0, arrow_step);
+                }
+                if i.key_pressed(egui::Key::ArrowDown) && !self.selection.is_empty() {
+                    self.timeline_panel.playing = false;
+                    self.nudge_selection(0.0, -arrow_step);
+                }
+                if i.key_pressed(egui::Key::G) && !i.modifiers.any() {
+                    self.snap = match self.snap {
+                        Some(_) => {
+                            self.set_status("Grid snap off");
+                            None
+                        }
+                        None => {
+                            self.set_status("Grid snap on (0.25)");
+                            Some(0.25)
+                        }
+                    };
+                }
+                if i.key_pressed(egui::Key::Escape) && !i.modifiers.any() {
+                    if !self.selection.is_empty() {
+                        self.selection.clear();
+                        self.set_status("Deselected");
+                    }
                 }
                 if i.key_pressed(egui::Key::R) && !i.modifiers.any() {
                     self.camera.reset();
@@ -1043,66 +1201,14 @@ impl eframe::App for MathOxideApp {
                             ui,
                             timeline_ref,
                             current_state,
-                            &mut self.selected_mobject,
+                            &mut self.selection,
                             &mut self.overrides,
                             &mut self.camera,
                             self.current_time,
                         );
 
-                        if let InspectorAction::ApplyShift { id, dx, dy } = inspector_action {
-                            if let Some(updated_code) = apply_shift_to_dsl(&self.editor_panel.code, &id, dx, dy) {
-                                self.editor_panel.code = updated_code;
-                                self.overrides.remove(&id);
-                                let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
-                                self.play_origins = origins;
-                                if let Some(t) = tl {
-                                    self.set_timeline(Some(t));
-                                }
-                                self.editor_panel.set_error(err);
-                                self.editor_panel.is_dirty = true;
-                                self.set_status(format!("Applied position ({:+.2}, {:+.2}) to code for '{}'", dx, dy, id));
-                            } else {
-                                // Check if `id` is a sub-object from an imported asset: `<alias>_<sub_id>`
-                                let base_dir = self.compile_base_dir();
-                                let mut handled = false;
-                                for line in self.editor_panel.code.lines() {
-                                    let trimmed = line.trim();
-                                    if trimmed.starts_with("import") {
-                                        let words: Vec<&str> = trimmed.split_whitespace().collect();
-                                        if words.len() >= 4 && words[0] == "import" && words[2] == "as" {
-                                            let rel_path = words[1].trim_matches('"');
-                                            let alias = words[3].trim_end_matches(';');
-                                            let prefix = format!("{alias}_");
-                                            if id.starts_with(&prefix) {
-                                                let sub_id = &id[prefix.len()..];
-                                                let asset_file = base_dir.join(rel_path);
-                                                if let Ok(asset_code) = std::fs::read_to_string(&asset_file) {
-                                                    if let Some(new_asset_code) = apply_shift_to_dsl(&asset_code, sub_id, dx, dy) {
-                                                        if std::fs::write(&asset_file, new_asset_code).is_ok() {
-                                                            self.overrides.remove(&id);
-                                                            let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &base_dir);
-                                                            self.play_origins = origins;
-                                                            if let Some(t) = tl {
-                                                                self.set_timeline(Some(t));
-                                                            }
-                                                            self.editor_panel.set_error(err);
-                                                            self.set_status(format!(
-                                                                "Applied position ({:+.2}, {:+.2}) to asset '{}' ({})",
-                                                                dx, dy, sub_id, asset_file.display()
-                                                            ));
-                                                            handled = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if !handled {
-                                    self.set_status(format!("Could not apply shift to code for '{}'", id));
-                                }
-                            }
+                        if let InspectorAction::ApplyShifts(shifts) = inspector_action {
+                            self.apply_shifts_to_source(shifts);
                         }
                     });
 
@@ -1129,76 +1235,103 @@ impl eframe::App for MathOxideApp {
                             timeline_ref,
                             self.current_time,
                             &mut self.camera,
-                            &mut self.selected_mobject,
+                            &mut self.selection,
                             &mut self.overrides,
                             base_state,
                             epoch,
                             self.fps,
+                            self.snap,
                         );
                     });
             });
     }
 }
 
-fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<String> {
+/// Rewrite one matched declaration/import line's `at (x, y)` by (dx, dy),
+/// inserting an `at` when the line carries none. Returns false if the line
+/// has no editable position.
+fn apply_shift_on_line(line: &mut String, target_id: &str, dx: f32, dy: f32, is_import: bool) -> bool {
+    if let Some(at_idx) = line.find("at (") {
+        if let Some(close_idx) = line[at_idx..].find(')') {
+            let full_close = at_idx + close_idx;
+            let inner = &line[at_idx + 4..full_close];
+            let parts: Vec<&str> = inner.split(',').collect();
+            if parts.len() == 2 {
+                let orig_x: f32 = parts[0].trim().parse().unwrap_or(0.0);
+                let orig_y: f32 = parts[1].trim().parse().unwrap_or(0.0);
+                let new_at = format!("at ({:.2}, {:.2})", orig_x + dx, orig_y + dy);
+                let mut new_line = line[..at_idx].to_string();
+                new_line.push_str(&new_at);
+                new_line.push_str(&line[full_close + 1..]);
+                *line = new_line;
+                return true;
+            }
+        }
+    }
+    if is_import {
+        let mut new_line = line.clone();
+        if let Some(semi_pos) = new_line.rfind(';') {
+            new_line.insert_str(semi_pos, &format!(" at ({:.2}, {:.2})", dx, dy));
+        } else {
+            new_line.push_str(&format!(" at ({:.2}, {:.2});", dx, dy));
+        }
+        *line = new_line;
+        return true;
+    }
+    // Bare-id fallback: a decl match whose line has no parseable `at (`.
+    if let Some(id_pos) = line.find(target_id) {
+        let insert_pos = id_pos + target_id.len();
+        let mut new_line = line[..insert_pos].to_string();
+        new_line.push_str(&format!(" at ({:.2}, {:.2})", dx, dy));
+        new_line.push_str(&line[insert_pos..]);
+        *line = new_line;
+        return true;
+    }
+    false
+}
+
+/// Apply several position shifts in ONE pass over the source. Returns the
+/// rewritten code (None if nothing matched) plus the ids that found no
+/// declaration line here (callers fall back to cross-file asset rewrites).
+fn apply_shifts_to_dsl(code: &str, shifts: &[(String, f32, f32)]) -> (Option<String>, Vec<String>) {
     let mut lines: Vec<String> = code.lines().map(|s| s.to_string()).collect();
-    let mut modified = false;
+    let mut pending: HashMap<String, (f32, f32)> = shifts
+        .iter()
+        .map(|(id, dx, dy)| (id.clone(), (*dx, *dy)))
+        .collect();
+    let mut applied = 0usize;
 
     for line in &mut lines {
+        if pending.is_empty() {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.starts_with("//") || trimmed.starts_with("/*") {
             continue;
         }
-
         let words: Vec<&str> = trimmed.split_whitespace().collect();
-        let is_decl_match = words.len() >= 2 && words[1] == target_id;
-        let is_import_match = words.len() >= 4
-            && words[0] == "import"
-            && words[2] == "as"
-            && words[3].trim_end_matches(';') == target_id;
-
-        if is_decl_match || is_import_match {
-            if let Some(at_idx) = line.find("at (") {
-                if let Some(close_idx) = line[at_idx..].find(')') {
-                    let full_close = at_idx + close_idx;
-                    let inner = &line[at_idx + 4..full_close];
-                    let parts: Vec<&str> = inner.split(',').collect();
-                    if parts.len() == 2 {
-                        let orig_x: f32 = parts[0].trim().parse().unwrap_or(0.0);
-                        let orig_y: f32 = parts[1].trim().parse().unwrap_or(0.0);
-                        let new_at = format!("at ({:.2}, {:.2})", orig_x + dx, orig_y + dy);
-                        let mut new_line = line[..at_idx].to_string();
-                        new_line.push_str(&new_at);
-                        new_line.push_str(&line[full_close + 1..]);
-                        *line = new_line;
-                        modified = true;
-                        break;
-                    }
-                }
-            } else if is_import_match {
-                let mut new_line = line.clone();
-                if let Some(semi_pos) = new_line.rfind(';') {
-                    new_line.insert_str(semi_pos, &format!(" at ({:.2}, {:.2})", dx, dy));
-                } else {
-                    new_line.push_str(&format!(" at ({:.2}, {:.2});", dx, dy));
-                }
-                *line = new_line;
-                modified = true;
+        let mut matched: Option<(String, bool)> = None;
+        for (target, _) in pending.iter() {
+            let is_decl = words.len() >= 2 && words[1] == target.as_str();
+            let is_import = words.len() >= 4
+                && words[0] == "import"
+                && words[2] == "as"
+                && words[3].trim_end_matches(';') == target.as_str();
+            if is_decl || is_import {
+                matched = Some((target.clone(), is_import));
                 break;
-            } else if let Some(id_pos) = line.find(target_id) {
-                let insert_pos = id_pos + target_id.len();
-                let new_at = format!(" at ({:.2}, {:.2})", dx, dy);
-                let mut new_line = line[..insert_pos].to_string();
-                new_line.push_str(&new_at);
-                new_line.push_str(&line[insert_pos..]);
-                *line = new_line;
-                modified = true;
-                break;
+            }
+        }
+        if let Some((target, is_import)) = matched {
+            let (dx, dy) = pending[&target];
+            if apply_shift_on_line(line, &target, dx, dy, is_import) {
+                pending.remove(&target);
+                applied += 1;
             }
         }
     }
 
-    if modified {
+    let out = if applied > 0 {
         let mut res = lines.join("\n");
         if code.ends_with('\n') {
             res.push('\n');
@@ -1206,7 +1339,12 @@ fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<S
         Some(res)
     } else {
         None
-    }
+    };
+    (out, pending.into_keys().collect())
+}
+
+fn apply_shift_to_dsl(code: &str, target_id: &str, dx: f32, dy: f32) -> Option<String> {
+    apply_shifts_to_dsl(code, &[(target_id.to_string(), dx, dy)]).0
 }
 
 /// Import base dir: the open file's folder (so `import "assets/x.moa"` works
@@ -1313,5 +1451,32 @@ mod tests {
         let code_without_at = "import \"assets/intro.moa\" as intro;\nplay showCreation(intro) 1s;\n";
         let updated2 = apply_shift_to_dsl(code_without_at, "intro", 0.5, 3.2).expect("applies shift");
         assert!(updated2.contains("import \"assets/intro.moa\" as intro at (0.50, 3.20);"));
+    }
+
+    #[test]
+    fn test_apply_shifts_to_dsl_batched_single_pass() {
+        let code = "circle c at (0, 0) r=1;\nsquare s at (3, 0) side=2;\n";
+        let shifts = vec![("c".to_string(), 1.0, 2.0), ("s".to_string(), -0.5, 0.25)];
+        let (out, unapplied) = apply_shifts_to_dsl(code, &shifts);
+        assert!(unapplied.is_empty());
+        let out = out.expect("both applied");
+        assert!(out.contains("circle c at (1.00, 2.00) r=1;"));
+        assert!(out.contains("square s at (2.50, 0.25) side=2;"));
+    }
+
+    #[test]
+    fn test_apply_shifts_to_dsl_reports_unmatched_ids() {
+        let code = "circle c at (0, 0) r=1;\n";
+        let shifts = vec![("c".to_string(), 1.0, 1.0), ("ghost".to_string(), 2.0, 2.0)];
+        let (out, unapplied) = apply_shifts_to_dsl(code, &shifts);
+        assert_eq!(unapplied, vec!["ghost".to_string()]);
+        assert!(out.expect("c applied").contains("circle c at (1.00, 1.00) r=1;"));
+    }
+
+    #[test]
+    fn test_apply_shifts_to_dsl_missing_target_is_none() {
+        let (out, unapplied) = apply_shifts_to_dsl("circle c r=1;\n", &[("nope".to_string(), 1.0, 1.0)]);
+        assert!(out.is_none());
+        assert_eq!(unapplied, vec!["nope".to_string()]);
     }
 }

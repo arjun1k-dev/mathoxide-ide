@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 pub enum InspectorAction {
     None,
-    ApplyShift { id: String, dx: f32, dy: f32 },
+    /// Persist position overrides back into the .moa source, batched:
+    /// (object id, dx, dy) per entry.
+    ApplyShifts(Vec<(String, f32, f32)>),
 }
 
 /// Runtime inspector and live override manager.
@@ -17,7 +19,7 @@ impl InspectorPanel {
         ui: &mut egui::Ui,
         timeline: Option<&Timeline>,
         current_state: &HashMap<String, std::sync::Arc<VGroup>>,
-        selected_mobject: &mut Option<String>,
+        selection: &mut Vec<String>,
         overrides: &mut HashMap<String, (f32, f32)>,
         camera: &mut Camera,
         current_time: f32,
@@ -27,12 +29,39 @@ impl InspectorPanel {
         ui.heading("Inspector");
         ui.separator();
 
-        if let Some(id) = selected_mobject.clone() {
+        // Multi-selection summary: batch-apply every overridden member.
+        if selection.len() > 1 {
+            ui.colored_label(
+                Color32::from_rgb(255, 224, 102),
+                format!("{} objects selected", selection.len()),
+            );
+            ui.monospace(selection.join(", "));
+            let overridden: Vec<(String, f32, f32)> = selection
+                .iter()
+                .filter_map(|id| overrides.get(id).map(|(dx, dy)| (id.clone(), *dx, *dy)))
+                .collect();
+            ui.horizontal(|ui| {
+                if ui
+                    .button("💾 Apply All to Code")
+                    .on_hover_text("Write every selected object's position override into source")
+                    .clicked()
+                    && !overridden.is_empty()
+                {
+                    action = InspectorAction::ApplyShifts(overridden);
+                }
+                if ui.button("Deselect All").clicked() {
+                    selection.clear();
+                }
+            });
+            ui.separator();
+        }
+
+        if let Some(id) = selection.last().cloned() {
             // Check if object exists in the scene
             let Some(group) = current_state.get(&id) else {
                 ui.label(format!("Mobject '{}' is currently inactive or hidden.", id));
                 if ui.button("Deselect").clicked() {
-                    *selected_mobject = None;
+                    selection.clear();
                 }
                 return action;
             };
@@ -42,7 +71,7 @@ impl InspectorPanel {
                 ui.strong(&id);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("✕").clicked() {
-                        *selected_mobject = None;
+                        selection.clear();
                     }
                 });
             });
@@ -84,11 +113,11 @@ impl InspectorPanel {
                     );
                     ui.horizontal(|ui| {
                         if ui.button("💾 Apply to Code").on_hover_text("Write updated position into editor code").clicked() {
-                            action = InspectorAction::ApplyShift {
-                                id: id.clone(),
-                                dx: current_shift.0,
-                                dy: current_shift.1,
-                            };
+                            action = InspectorAction::ApplyShifts(vec![(
+                                id.clone(),
+                                current_shift.0,
+                                current_shift.1,
+                            )]);
                         }
                         if ui.button("Reset Shift").clicked() {
                             overrides.remove(&id);

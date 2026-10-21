@@ -12,7 +12,9 @@ pub struct ViewportPanel {
     is_dragging_mob: bool,
     is_panning: bool,
     is_orbiting: bool,
-    drag_mob_offset: (f32, f32),
+    /// Group-drag grab points: (id, pointer-relative offset) captured at drag
+    /// start for every selected object, so the whole selection moves as one.
+    group_grab: Vec<(String, (f32, f32))>,
     /// Hash of the last rendered frame's inputs; equal hash = skip eval + GPU pass.
     last_draw_sig: Option<u64>,
     /// Cached `has_camera_anims` scan, invalidated by timeline epoch.
@@ -85,7 +87,7 @@ impl ViewportPanel {
             is_dragging_mob: false,
             is_panning: false,
             is_orbiting: false,
-            drag_mob_offset: (0.0, 0.0),
+            group_grab: Vec::new(),
             last_draw_sig: None,
             cam_anims: (0, false),
             shift_cache: HashMap::new(),
@@ -101,11 +103,12 @@ impl ViewportPanel {
         timeline: Option<&Timeline>,
         current_time: f32,
         camera: &mut Camera,
-        selected_mobject: &mut Option<String>,
+        selection: &mut Vec<String>,
         overrides: &mut HashMap<String, (f32, f32)>,
         base_state: &HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>>,
         timeline_epoch: u64,
         fps: f32,
+        snap: Option<f32>,
     ) {
         let avail_size = ui.available_size();
         let padding = 12.0;
@@ -262,6 +265,19 @@ impl ViewportPanel {
         let cursor_in_screen = response.hover_pos();
         let mut cursor_scene_pos = None;
 
+        // AABB hit-test against what's on screen: `state` is the unshifted
+        // base on skip frames, so compensate for drag overrides.
+        let hit_test = |px: f32, py: f32| -> Option<String> {
+            for (id, group) in state.iter() {
+                let (min, max) = group.bounds();
+                let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
+                if px >= min[0] + odx && px <= max[0] + odx && py >= min[1] + ody && py <= max[1] + ody {
+                    return Some(id.clone());
+                }
+            }
+            None
+        };
+
         if let Some(pos) = cursor_in_screen {
             let local_x = pos.x - canvas_rect.left();
             let local_y = pos.y - canvas_rect.top();
@@ -274,20 +290,22 @@ impl ViewportPanel {
                 camera.frame_height = (camera.frame_height * (1.0 - scroll_delta * 0.002)).clamp(0.1, 100.0);
             }
 
-            // Click handling
+            // Click handling: Shift+click toggles membership; plain click
+            // selects (or clears on empty space).
             if response.clicked() {
-                let mut clicked_id = None;
-                for (id, group) in state.iter() {
-                    let (min, max) = group.bounds();
-                    // On skip frames `state` is the unshifted base — compensate
-                    // for drag overrides so hit-tests match what's on screen.
-                    let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
-                    if sc.x >= min[0] + odx && sc.x <= max[0] + odx && sc.y >= min[1] + ody && sc.y <= max[1] + ody {
-                        clicked_id = Some(id.clone());
-                        break;
+                if let Some(hit) = hit_test(sc.x, sc.y) {
+                    if ui.input(|i| i.modifiers.shift) {
+                        if let Some(i) = selection.iter().position(|s| s == &hit) {
+                            selection.remove(i);
+                        } else {
+                            selection.push(hit);
+                        }
+                    } else {
+                        *selection = vec![hit];
                     }
+                } else if !ui.input(|i| i.modifiers.shift) {
+                    selection.clear();
                 }
-                *selected_mobject = clicked_id;
             }
 
             // Drag handling modifiers
@@ -302,28 +320,43 @@ impl ViewportPanel {
                     self.is_orbiting = true;
                     self.is_panning = false;
                     self.is_dragging_mob = false;
-                } else if is_middle_down || is_shift_down || selected_mobject.is_none() {
-                    // Middle-click, Shift-drag, or dragging empty space = Camera pan
+                } else if is_middle_down || is_shift_down {
+                    // Middle-click or Shift-drag = Camera pan
                     self.is_panning = true;
                     self.is_orbiting = false;
                     self.is_dragging_mob = false;
-                } else if let Some(id) = selected_mobject {
-                    if let Some(group) = state.get(id) {
-                        let (min, max) = group.bounds();
-                        let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
-                        if sc.x >= min[0] + odx && sc.x <= max[0] + odx && sc.y >= min[1] + ody && sc.y <= max[1] + ody {
+                } else {
+                    // Dragging an object moves the whole selection; dragging
+                    // an unselected object selects it solo first; empty space pans.
+                    let hit = hit_test(sc.x, sc.y);
+                    let over_selected = hit.as_ref().map(|h| selection.contains(h)).unwrap_or(false);
+                    if let Some(h) = hit {
+                        if !over_selected {
+                            *selection = vec![h];
+                        }
+                        self.group_grab.clear();
+                        for id in selection.iter() {
+                            if let Some(group) = state.get(id) {
+                                let mut c = group.center();
+                                let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
+                                c.x += odx;
+                                c.y += ody;
+                                self.group_grab.push((id.clone(), (c.x - sc.x, c.y - sc.y)));
+                            }
+                        }
+                        if !self.group_grab.is_empty() {
                             self.is_dragging_mob = true;
                             self.is_panning = false;
                             self.is_orbiting = false;
-                            let mut c = group.center();
-                            c.x += odx;
-                            c.y += ody;
-                            self.drag_mob_offset = (c.x - sc.x, c.y - sc.y);
                         } else {
                             self.is_panning = true;
                             self.is_orbiting = false;
                             self.is_dragging_mob = false;
                         }
+                    } else {
+                        self.is_panning = true;
+                        self.is_orbiting = false;
+                        self.is_dragging_mob = false;
                     }
                 }
             }
@@ -347,17 +380,19 @@ impl ViewportPanel {
                     camera.center.x -= p2.x - p1.x;
                     camera.center.y -= p2.y - p1.y;
                 } else if self.is_dragging_mob {
-                    if let Some(id) = selected_mobject {
-                        // base_state is exactly `Player::state_at(tl, current_time)`
-                        // pre-evaluated by the app — no second evaluation here.
+                    // base_state is exactly `Player::state_at(tl, current_time)`
+                    // pre-evaluated by the app — no second evaluation here.
+                    for (id, rel) in &self.group_grab {
                         let base_center = base_state
                             .get(id)
                             .map(|g| g.center())
                             .unwrap_or(glam::Vec3::ZERO);
-                        let target_x = sc.x + self.drag_mob_offset.0;
-                        let target_y = sc.y + self.drag_mob_offset.1;
-                        let shift_x = target_x - base_center.x;
-                        let shift_y = target_y - base_center.y;
+                        let mut shift_x = sc.x + rel.0 - base_center.x;
+                        let mut shift_y = sc.y + rel.1 - base_center.y;
+                        if let Some(q) = snap.filter(|q| *q > 0.0) {
+                            shift_x = (shift_x / q).round() * q;
+                            shift_y = (shift_y / q).round() * q;
+                        }
                         overrides.insert(id.clone(), (shift_x, shift_y));
                     }
                 }
@@ -368,30 +403,40 @@ impl ViewportPanel {
             self.last_cursor_pos = None;
         }
 
-        // Draw Selection Bounding Box on top of Viewport
-        if let Some(id) = selected_mobject {
-            if let Some(group) = state.get(id) {
-                let (mut min, mut max) = group.bounds();
-                let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
-                min[0] += odx;
-                min[1] += ody;
-                max[0] += odx;
-                max[1] += ody;
-                let p_min = cam.scene_to_screen(min[0], min[1]);
-                let p_max = cam.scene_to_screen(max[0], max[1]);
+        // Draw Selection Bounding Boxes on top of the viewport. The primary
+        // (last-selected) object gets the cyan box + handles + id tag; the
+        // rest of the selection gets a dim violet stroke.
+        let primary = selection.last().cloned();
+        for id in selection.iter() {
+            let Some(group) = state.get(id) else { continue };
+            let (mut min, mut max) = group.bounds();
+            let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
+            min[0] += odx;
+            min[1] += ody;
+            max[0] += odx;
+            max[1] += ody;
+            let p_min = cam.scene_to_screen(min[0], min[1]);
+            let p_max = cam.scene_to_screen(max[0], max[1]);
 
-                let screen_min = Pos2::new(canvas_rect.left() + p_min.x, canvas_rect.top() + p_min.y);
-                let screen_max = Pos2::new(canvas_rect.left() + p_max.x, canvas_rect.top() + p_max.y);
+            let screen_min = Pos2::new(canvas_rect.left() + p_min.x, canvas_rect.top() + p_min.y);
+            let screen_max = Pos2::new(canvas_rect.left() + p_max.x, canvas_rect.top() + p_max.y);
 
-                let box_rect = Rect::from_two_pos(screen_min, screen_max);
+            let box_rect = Rect::from_two_pos(screen_min, screen_max);
+            let is_primary = primary.as_deref() == Some(id.as_str());
+            let accent = if is_primary {
+                Color32::from_rgb(88, 196, 221)
+            } else {
+                Color32::from_rgb(199, 36, 255)
+            };
 
-                painter.rect_stroke(
-                    box_rect.expand(4.0),
-                    3.0,
-                    Stroke::new(1.5_f32, Color32::from_rgb(88, 196, 221)),
-                    egui::StrokeKind::Inside,
-                );
+            painter.rect_stroke(
+                box_rect.expand(4.0),
+                3.0,
+                Stroke::new(if is_primary { 1.5_f32 } else { 1.0_f32 }, accent),
+                egui::StrokeKind::Inside,
+            );
 
+            if is_primary {
                 // Small corner handle markers
                 let corners = [
                     box_rect.left_top(),
@@ -400,7 +445,7 @@ impl ViewportPanel {
                     box_rect.right_bottom(),
                 ];
                 for c in corners {
-                    painter.circle_filled(c, 3.5, Color32::from_rgb(88, 196, 221));
+                    painter.circle_filled(c, 3.5, accent);
                 }
 
                 // ID Tag
@@ -409,7 +454,7 @@ impl ViewportPanel {
                     egui::Align2::LEFT_BOTTOM,
                     id,
                     egui::FontId::monospace(12.0),
-                    Color32::from_rgb(88, 196, 221),
+                    accent,
                 );
             }
         }
@@ -424,17 +469,22 @@ impl ViewportPanel {
             Color32::from_rgba_unmultiplied(220, 225, 240, 190),
         );
 
-        // Top-right: FPS & 3D Orbit Status
+        // Top-right: FPS & 3D Orbit Status (+ snap badge when active)
         let is_3d = cam.phi.abs() > 0.01 || cam.theta.abs() > 0.01;
+        let snap_badge = snap
+            .filter(|q| *q > 0.0)
+            .map(|q| format!(" | SNAP {:.2}", q))
+            .unwrap_or_default();
         let camera_status = if is_3d {
             format!(
-                "🎥 3D Orbit: φ {}° θ {}° | {:.0} FPS",
+                "🎥 3D Orbit: φ {}° θ {}° | {:.0} FPS{}",
                 cam.phi.to_degrees().round() as i32,
                 cam.theta.to_degrees().round() as i32,
-                fps
+                fps,
+                snap_badge
             )
         } else {
-            format!("🎥 2D View | Zoom {:.2}x | {:.0} FPS", 8.0 / cam.frame_height, fps)
+            format!("🎥 2D View | Zoom {:.2}x | {:.0} FPS{}", 8.0 / cam.frame_height, fps, snap_badge)
         };
 
         painter.text(
@@ -464,7 +514,7 @@ impl ViewportPanel {
         painter.text(
             Pos2::new(canvas_rect.right() - 10.0, canvas_rect.bottom() - 10.0),
             egui::Align2::RIGHT_BOTTOM,
-            "Pan: Shift+Drag | 3D Orbit: Right-Drag / Alt+Drag | Reset: R",
+            "Pan: Shift+Drag | 3D Orbit: Right-Drag / Alt+Drag | Reset: R | Snap: G | Esc: Deselect",
             egui::FontId::monospace(10.0),
             Color32::from_rgba_unmultiplied(150, 160, 180, 140),
         );
