@@ -47,6 +47,10 @@ pub struct MathOxideApp {
     /// lazily by `sync_master_scope` when stale; the editor keeps showing the
     /// open asset while the composition timeline drives playback.
     master_scope: Option<(PathBuf, std::time::SystemTime, Timeline, Vec<mo_dsl::PlayOrigin>)>,
+    /// Synthetic preview timeline for play-less files (declarative assets):
+    /// (timeline epoch it was built from, timeline of sequential ShowCreation
+    /// write-ins). Never persisted — source stays untouched.
+    solo_preview: Option<(u64, Timeline)>,
     /// Bumped on every timeline replacement (recompile, import, open file);
     /// invalidates the state cache and viewport frame signature.
     timeline_epoch: u64,
@@ -163,6 +167,7 @@ impl MathOxideApp {
             timeline,
             play_origins,
             master_scope: None,
+            solo_preview: None,
             timeline_epoch: 0,
             frame_memo: mo_core::FrameMemo::new(16_384),
             index_cache: None,
@@ -211,10 +216,38 @@ impl MathOxideApp {
         self.timeline_panel.scope == PlaybackScope::FullMaster && self.master_scope.is_some()
     }
 
+    /// Whether the synthetic play-less preview is driving playback.
+    fn solo_preview_active(&self) -> bool {
+        self.solo_preview.is_some()
+    }
+
+    /// Rebuild the synthetic preview when the current timeline has no plays
+    /// (declarative asset opened solo). Called each frame like
+    /// `sync_master_scope`; epoch-stamped so it rebuilds only on recompile.
+    fn sync_solo_preview(&mut self) {
+        if self.timeline_panel.scope != PlaybackScope::ThisFile {
+            self.solo_preview = None;
+            return;
+        }
+        let epoch = self.timeline_epoch;
+        match (&self.solo_preview, self.timeline.as_ref()) {
+            (Some((e, _)), _) if *e == epoch => {} // fresh
+            (_, Some(tl)) if !tl.stmts.iter().any(|s| matches!(s, mo_core::scene::Stmt::Play(_))) => {
+                self.solo_preview = Some((epoch, build_solo_preview(tl)));
+                self.set_status(
+                    "No play statements in this file — synthetic preview (objects write in top-to-bottom)",
+                );
+            }
+            _ => self.solo_preview = None,
+        }
+    }
+
     /// Duration of whichever timeline the transport is scoped to.
     fn active_duration(&self) -> Option<f32> {
         if self.full_master_active() {
             self.master_scope.as_ref().map(|(_, _, tl, _)| tl.duration())
+        } else if let Some((_, preview)) = &self.solo_preview {
+            Some(preview.duration())
         } else {
             self.timeline.as_ref().map(|tl| tl.duration())
         }
@@ -884,8 +917,10 @@ impl eframe::App for MathOxideApp {
             }
         }
 
-        // Keep the master-scope cache fresh before anything samples it.
+        // Keep the master-scope cache and the play-less solo preview fresh
+        // before anything samples them.
         self.sync_master_scope();
+        self.sync_solo_preview();
 
         // Advance timeline playback if playing
         if self.timeline_panel.playing {
@@ -1031,6 +1066,8 @@ impl eframe::App for MathOxideApp {
                     if ui.button("Export MP4 Video...").clicked() {
                         let export_tl = if self.full_master_active() {
                             self.master_scope.as_ref().map(|(_, _, tl, _)| tl.clone())
+                        } else if let Some((_, preview)) = self.solo_preview.as_ref() {
+                            Some(preview.clone())
                         } else {
                             self.timeline.clone()
                         };
@@ -1146,14 +1183,19 @@ impl eframe::App for MathOxideApp {
             .resizable(false)
             .show(ctx, |ui| {
                 let full_master = self.full_master_active();
+                let solo_active = self.solo_preview_active();
                 let master_available = self.scope_master_path().is_some();
                 let scope_before = self.timeline_panel.scope;
                 // Scope-aware borrows: drag edits mutate the master-scope
-                // timeline in memory; Apply Timings persists cross-file.
+                // timeline in memory; the synthetic solo preview is editable
+                // in memory too but never persisted. Apply Timings persists
+                // cross-file.
                 let (tl_mut, origins_ref): (Option<&mut Timeline>, &[mo_dsl::PlayOrigin]) =
                     if full_master {
                         let (_, _, tl, org) = self.master_scope.as_mut().unwrap();
                         (Some(tl), org.as_slice())
+                    } else if solo_active {
+                        (Some(&mut self.solo_preview.as_mut().unwrap().1), &[])
                     } else {
                         (self.timeline.as_mut(), self.play_origins.as_slice())
                     };
@@ -1183,6 +1225,8 @@ impl eframe::App for MathOxideApp {
                     Some(crate::timeline::TimelineAction::Edited) => {
                         if full_master {
                             self.set_status("Master timeline dragged — 💾 Apply Timings to persist");
+                        } else if solo_active {
+                            self.set_status("Preview-only timeline — add play statements to persist timings");
                         } else {
                             self.editor_panel.is_dirty = true;
                         }
@@ -1190,6 +1234,8 @@ impl eframe::App for MathOxideApp {
                     Some(crate::timeline::TimelineAction::ApplyTimings(run_times)) => {
                         if full_master {
                             self.apply_timings_master_scope(run_times);
+                        } else if solo_active {
+                            self.set_status("Preview-only timeline — add play statements to persist timings");
                         } else {
                         match mo_dsl::parse_with_origins_in(&self.editor_panel.code, &self.compile_base_dir()) {
                             Ok((_, origins))
@@ -1346,6 +1392,8 @@ impl eframe::App for MathOxideApp {
                     .show_inside(ui, |ui| {
                         let timeline_ref: Option<&Timeline> = if self.full_master_active() {
                             self.master_scope.as_ref().map(|(_, _, tl, _)| tl)
+                        } else if let Some((_, preview)) = self.solo_preview.as_ref() {
+                            Some(preview)
                         } else {
                             self.timeline.as_ref()
                         };
@@ -1376,6 +1424,8 @@ impl eframe::App for MathOxideApp {
                     .show_inside(ui, |ui| {
                         let timeline_ref: Option<&Timeline> = if self.full_master_active() {
                             self.master_scope.as_ref().map(|(_, _, tl, _)| tl)
+                        } else if let Some((_, preview)) = self.solo_preview.as_ref() {
+                            Some(preview)
                         } else {
                             self.timeline.as_ref()
                         };
@@ -1597,6 +1647,26 @@ fn find_string_decl<'a>(code: &str, id: &str, params: &[&'a str]) -> Option<(usi
     None
 }
 
+/// Build a synthetic preview timeline for a play-less asset by adding sequential
+/// ShowCreation animations for each declared object.
+fn build_solo_preview(tl: &Timeline) -> Timeline {
+    let mut out = Timeline::default();
+    for stmt in &tl.stmts {
+        out.stmts.push(stmt.clone());
+        if let mo_core::scene::Stmt::Decl { id, .. } = stmt {
+            out.stmts.push(mo_core::scene::Stmt::Play(mo_core::anim::TimedAnim::new(
+                mo_core::anim::Animation::ShowCreation { id: id.clone() },
+                1.0,
+                "smooth",
+            )));
+        }
+    }
+    if out.stmts.iter().any(|s| matches!(s, mo_core::scene::Stmt::Play(_))) {
+        out.stmts.push(mo_core::scene::Stmt::Wait(1.0));
+    }
+    out
+}
+
 /// Import base dir: the open file's folder (so `import "assets/x.moa"` works
 /// from any CWD), falling back to the active project, then the source root.
 fn compile_code_in(code: &str, base: &Path) -> (Option<Timeline>, Vec<mo_dsl::PlayOrigin>, Option<String>) {
@@ -1760,4 +1830,14 @@ mod tests {
         assert!(mo_dsl::parse_or_report(&new_code).is_ok());
         let _ = value;
     }
+
+    #[test]
+    fn test_build_solo_preview_generates_show_creation_for_decls() {
+        let code = "circle c r=1;\nsquare s size=2;\n";
+        let tl = mo_dsl::parse_or_report(code).unwrap();
+        let preview = build_solo_preview(&tl);
+        assert_eq!(preview.stmts.len(), 5); // 2 decls + 2 plays + 1 wait
+        assert!(preview.duration() > 0.0);
+    }
 }
+

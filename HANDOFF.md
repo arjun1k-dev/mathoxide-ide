@@ -4,7 +4,7 @@
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM; 16 GB RAM — buffers/lists are fine, VRAM is the constraint).
-* **Build & Test Health**: **69 workspace unit tests pass, zero compiler warnings** (mo-core: 36, mo-dsl: 17, mo-ide: 12, mo-moab: 2, mo-render: 2).
+* **Build & Test Health**: **77 workspace unit tests pass, zero compiler warnings** (mo-core: 36, mo-dsl: 17, mo-ide: 20, mo-moab: 2, mo-render: 2).
 * This session delivered:
   1. Full **Manim Community (Manim CE) built-in object library**: complete 2D shapes (`arc`, `rounded_rect`, `ellipse`, `regular_polygon`, `triangle`, `annulus`, `sector`, `annular_sector`, `star`, `brace`, `elbow`), 1D lines (`dashed_line`, `tangent_line`, `double_arrow`, `curved_arrow`, `curved_double_arrow`), and 3D primitives (`cylinder`, `cone`, `line3d`, `dot3d`).
   2. **Coordinate systems & calculus tools**: `number_plane` (grid lines), `complex_plane`, `polar_plane`, `number_line`, `parametric` curves, `riemann` sums (left/right/midpoint), `secant` lines, `area` under curve, `barchart`.
@@ -112,7 +112,7 @@ mathoxide/
 ## 6. How to Run & Test
 
 ```bash
-cargo test --workspace                                  # 69 tests, 0 warnings
+cargo test --workspace                                  # 77 tests, 0 warnings
 
 cargo run -p mo-ide                                     # Studio (1280×800 fixed)
 
