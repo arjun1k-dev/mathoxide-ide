@@ -673,7 +673,7 @@ impl eframe::App for MathOxideApp {
 
         // Bottom: timeline (fixed height, not resizable)
         egui::TopBottomPanel::bottom("bottom_timeline_panel")
-            .exact_height(150.0)
+            .exact_height(180.0)
             .resizable(false)
             .show(ctx, |ui| {
                 let mut panel = std::mem::take(&mut self.timeline_panel);

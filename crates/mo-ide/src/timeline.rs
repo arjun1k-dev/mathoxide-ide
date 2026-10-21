@@ -169,15 +169,22 @@ impl TimelinePanel {
 
         ui.add_space(4.0);
 
-        // Visual animation tracks (sequencer view)
+        // Visual animation tracks (sequencer view). Vertically scrollable so
+        // every track is reachable; drag_to_scroll is off because the painter's
+        // click_and_drag sense owns horizontal block drags (move/trim/seek).
         let track_height = 22.0;
         let track_infos = collect_tracks(tl, origins);
         if track_infos.is_empty() {
             return None;
         }
-        let num_tracks = track_infos.len().min(8);
-        let total_track_area_height = (num_tracks as f32) * (track_height + 4.0) + 10.0;
+        let total_track_area_height =
+            (track_infos.len() as f32) * (track_height + 4.0) + 10.0;
 
+        egui::ScrollArea::vertical()
+            .id_salt("timeline_tracks_scroll")
+            .auto_shrink([false, false])
+            .drag_to_scroll(false)
+            .show(ui, |ui| {
         let (response, painter) = ui.allocate_painter(
             egui::vec2(ui.available_width(), total_track_area_height),
             egui::Sense::click_and_drag(),
@@ -198,7 +205,7 @@ impl TimelinePanel {
         // Hit-test the pointer against block edges/bodies.
         let mut hit: Option<(usize, DragMode)> = None;
         if let Some(p) = pointer {
-            for (i, b) in blocks.iter().enumerate().take(num_tracks) {
+            for (i, b) in blocks.iter().enumerate() {
                 if b.rect.contains(p) {
                     let mode = if p.x >= b.rect.right() - EDGE_GRAB {
                         DragMode::TrimR
@@ -308,7 +315,7 @@ impl TimelinePanel {
 
         // Draw each animation block (recomputed after any drag mutation).
         let blocks = layout_blocks(tl, origins, rect, track_height);
-        for b in blocks.iter().take(num_tracks) {
+        for b in blocks.iter() {
             let is_active = *current_time >= b.start && *current_time <= b.start + b.run;
             let final_bg = if is_active {
                 Color32::from_rgb(
@@ -347,17 +354,21 @@ impl TimelinePanel {
             }
         }
 
-        // Draw vertical playhead cursor
+        // Draw vertical playhead cursor. Clamp the dot's y into the visible
+        // clip region so it stays visible when scrolled.
         let cursor_x = rect.left() + (*current_time / total_duration) * rect.width();
         painter.line_segment(
             [Pos2::new(cursor_x, rect.top()), Pos2::new(cursor_x, rect.bottom())],
             Stroke::new(2.0_f32, Color32::from_rgb(255, 255, 255)),
         );
+        let clip = ui.clip_rect().intersect(rect);
+        let dot_y = (rect.top() + 3.0).clamp(clip.top() + 3.0, clip.bottom().max(clip.top() + 3.0) - 3.0);
         painter.circle_filled(
-            Pos2::new(cursor_x, rect.top() + 3.0),
+            Pos2::new(cursor_x, dot_y),
             4.0,
             Color32::from_rgb(252, 98, 85),
         );
+        });
 
         action
     }
@@ -621,7 +632,31 @@ pub fn apply_timings_multi(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_timings_multi;
+    use super::{apply_timings_multi, layout_blocks};
+    use crate::ext::egui;
+
+    #[test]
+    fn layout_blocks_exposes_every_track_without_cap() {
+        // 10 plays used to be capped at 8 visible tracks.
+        let plays: Vec<mo_core::scene::Stmt> = (0..10)
+            .map(|i| {
+                mo_core::scene::Stmt::Play(mo_core::anim::TimedAnim::new(
+                    mo_core::anim::Animation::ShowCreation { id: format!("c{i}") },
+                    1.0,
+                    "smooth",
+                ))
+            })
+            .collect();
+        let mut tl = mo_core::scene::Timeline::default();
+        tl.stmts = plays;
+        let origins = vec![mo_dsl::PlayOrigin { file: None, local_play_idx: 0 }; 10];
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 10_000.0));
+        let blocks = layout_blocks(&tl, &origins, rect, 22.0);
+        assert_eq!(blocks.len(), 10, "all tracks must be laid out (no 8-cap)");
+        for pair in blocks.windows(2) {
+            assert!(pair[1].rect.top() > pair[0].rect.bottom());
+        }
+    }
 
     #[test]
     fn rewrites_play_durations_in_order() {
