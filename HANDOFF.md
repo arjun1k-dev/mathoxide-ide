@@ -4,7 +4,7 @@
 
 * **Repository**: `/home/arjun/Projects/mathoxide` (git branch `main`)
 * **Core Philosophy**: A pure-Rust, lightweight mathematical animation engine, visual IDE studio, and agentic media suite replacing Manim / ManimGL with zero Python runtime dependency, optimized to run smoothly on standard laptops with integrated graphics (~128 MB VRAM; 16 GB RAM — buffers/lists are fine, VRAM is the constraint).
-* **Build & Test Health**: **68 workspace unit tests pass, zero compiler warnings** (mo-core: 35, mo-dsl: 17, mo-ide: 12, mo-moab: 2, mo-render: 2).
+* **Build & Test Health**: **69 workspace unit tests pass, zero compiler warnings** (mo-core: 36, mo-dsl: 17, mo-ide: 12, mo-moab: 2, mo-render: 2).
 * This session delivered:
   1. Full **Manim Community (Manim CE) built-in object library**: complete 2D shapes (`arc`, `rounded_rect`, `ellipse`, `regular_polygon`, `triangle`, `annulus`, `sector`, `annular_sector`, `star`, `brace`, `elbow`), 1D lines (`dashed_line`, `tangent_line`, `double_arrow`, `curved_arrow`, `curved_double_arrow`), and 3D primitives (`cylinder`, `cone`, `line3d`, `dot3d`).
   2. **Coordinate systems & calculus tools**: `number_plane` (grid lines), `complex_plane`, `polar_plane`, `number_line`, `parametric` curves, `riemann` sums (left/right/midpoint), `secant` lines, `area` under curve, `barchart`.
@@ -98,16 +98,21 @@ mathoxide/
 * **3D camera** — polar φ/θ/γ; orbit/pan/zoom; `Player::camera_at(tl, t, base)` wired into CLI + IDE (NOT `mo preview`).
 * **Typst-powered LaTeX**, sequential subpath reveal; no synthetic stroke on glyphs ever.
 * **Timeline sequencer** — drag/trim/`💾 Apply Timings to Code` via `apply_timings_multi` + `PlayOrigin` (cross-file rewrites).
-* **GPU buffer cache** (`mo-render/src/pipelines.rs`) — content-hashed uploads; wireframe decimation; res clamp 400.
+* **GPU buffer cache + staging ring** (`mo-render/src/pipelines.rs`) — content-hashed over raw `points` bytes + subpaths + uniforms (`group_content_hash`); records are only built on cache miss; budget-based eviction (512 entries / 64 MB — kept lean for the 128 MB iGPU, stale-frame first) recycles evicted buffers into a bounded pool (`BufCache::retire`, ≤4 MB) instead of freeing them. Miss uploads are packed into a persistent 16 MB staging buffer and copied to pooled storage/uniform buffers (`stage_copy`; direct `queue.write_buffer` fallback when the ring is exhausted). Uploads are resolved BEFORE `begin_render_pass` — the pass borrows the encoder exclusively. Present bind group + readback buffer are persistent.
 * **Explorer scan model** — `ProjectEntry { name, path, master, assets }` per folder under src_root; legacy flat `assets/`/`examples/` folders surface as pseudo-projects; root .moa files go to `loose`.
 * **Autocomplete internals** — `completion.rs` is pure/logic-side (catalog, `user_symbols`, `prefix_before_caret`, `prefix_span_at`, `line_col_of`, `word_at_line_col`); editor.rs does egui UI. Accept path replaces the *byte span* of the identifier prefix ending at the caret and restores caret via `TextEditState::load/store` + `cursor.set_char_range`.
+* **Arc scene state** — `Stmt::Decl.obj` and `Animation::Transform.target` are `Arc<VGroup>` (serde `rc` feature); `Player::state_at` returns `HashMap<String, Arc<VGroup>>` and cloning state is refcount bumps. Only the actively-animated object materializes a fresh VGroup per frame; completed Rotate/Scale/Shift finals are baked once per stmt into `TimelineIndex.baked_final`.
+* **`Timeline::index()` / `Player::state_at_indexed`** — the t-invariant preamble is precomputed once per timeline: the Decl preamble is fully resolved into `decl_base` (ungated objects, cloned per sample as pure refcount bumps) + `intro_decls` (gated, inserted once `t >=` intro time), so the per-frame pure-target point-equality scan and per-Decl inserts are gone. `baked_final` caches completed Rotate/Scale/Shift geometry per stmt. Hot loops (IDE `eval_state_cached`, `mo preview`, CLI render loop) reuse the index; plain `state_at` builds it on the fly.
+* **`FrameMemo`** (`mo-core/src/scene.rs`) — LRU (16384 entries) of sampled scene states keyed `(timeline_epoch, time_bits)`; values are Arc-shared maps so entries cost only map/key overhead. Wired into IDE `eval_state_cached` and `mo preview` `base_state()` — playback loops and scrub revisits are pure lookups; a timeline bump (epoch in key) orphans old entries. Eviction drops ~1/8 oldest in one pass (amortized). RAM-for-speed: idle ~90 MB, growth only from visited frames, plateaus at the cap.
+* **`Timeline::duration()` memoized** via a `#[serde(skip)]` `OnceLock` (manual `Clone` resets it — struct literals elsewhere must use `Timeline::default()`/`new()`, not full literals).
+* **IDE frame coherence** — one scene eval per frame shared by inspector + viewport (`app.rs::eval_state_cached`, keyed by time bits + `timeline_epoch`); viewport computes a `frame_sig` hash (time, camera, size, overrides, epoch) and skips the eval + GPU pass entirely when paused/unchanged; auto-compile is debounced 200 ms (flushed on save). `mo preview` similarly sig-guards `draw()` and only requests redraws while playing.
 
 ---
 
 ## 6. How to Run & Test
 
 ```bash
-cargo test --workspace                                  # 61 tests, 0 warnings
+cargo test --workspace                                  # 69 tests, 0 warnings
 
 cargo run -p mo-ide                                     # Studio (1280×800 fixed)
 
@@ -147,18 +152,22 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_ass
     - JSON-RPC response `anim_label` in `crates/mo-mcp/src/main.rs`
 18. **Multi-Font Zero-Dependency Fallback**: `mo_core::text::get_font_bytes` resolves fonts dynamically (checking system paths for `"serif"` / `"sans"` / custom paths), but always falls back to embedded TrueType byte arrays (`UBUNTU_LIGHT`, `HACK_REGULAR`, `NOTO_EMOJI_REGULAR`). The engine runs with 0 system font dependencies and never crashes when offline or on minimal OS installations.
 19. **DSL Object Declaration Grammar**: MathOxide DSL uses whitespace-delimited `<kind> <id> <param>=<val> ...;` syntax (e.g. `arc a r=2.0 start=0.0 end=3.14;`), NOT `let x = kind(...);`. Object kinds and animation functions are lowercase/camelCase.
+20. **Dependency Façade Rule**: every third-party dep has one owning module per crate; don't add `use <dep>::` outside it. Concretely: mo-ide imports GUI types only via `crate::ext` (`crates/mo-ide/src/ext.rs` re-exports `egui`/`eframe`/`egui_wgpu`/`wgpu`/`image`); mo-render's wgpu boundary is aliased in `pipelines.rs` (`GpuDevice`, `GpuQueue`, `GpuTextureFormat`, `GpuCommandEncoder`, `GpuTextureView`) and callers never name `wgpu::`; mo-interactive/src/lib.rs owns all winit; mo-core/src/lib.rs re-exports shared math deps (`glam`, `nalgebra`, `ndarray`, `num_complex`) for downstream crates. A dependency version bump should be a one-file edit most of the time. The app icon is embedded at `crates/mo-ide/assets/mo.ico` (decoded in `main.rs::load_window_icon` → `ViewportBuilder::with_icon`); desktop launcher at `~/.local/share/applications/mathoxide.desktop` + `~/Desktop/`, binary installed to `~/.local/bin/mathoxide`, hicolor icon at `~/.local/share/icons/hicolor/256x256/apps/mathoxide.png`.
+21. **Arc-state mutation sites**: `HashMap<String, Arc<VGroup>>` values are immutable — to apply a per-object override (IDE viewport shifts, `mo preview` drag), clone the one VGroup out of its Arc, mutate, and re-insert a fresh `Arc` (see `viewport.rs` / `mo-interactive/src/lib.rs`). Never `Arc::make_mut` inside eval — it would deep-copy shared geometry.
+22. **Timeline replacement must bump `timeline_epoch`** — in mo-ide always assign via `self.set_timeline(...)` (never `self.timeline = ...` directly) or the state cache / viewport frame signature will serve stale frames.
+23. **Staging-ring uploads precede the render pass**: `draw_scene_pass` resolves cache hits/uploads *before* `begin_render_pass` because the pass borrows the encoder exclusively (`stage_copy` needs `&mut encoder`). Don't move uploads back inside the draw loop. Misses that overflow the 16 MB ring fall back to direct `queue.write_buffer` — correct, just unpooled.
+24. **Override-shift cache keys on base `Arc::as_ptr`** (viewport `shift_cache`): the entry keeps its base `Arc<VGroup>` alive, which is what makes the pointer identity sound — never store a raw pointer key without keeping the owner alive. Cleared on timeline epoch and capped (~128) against playback-drag growth.
 
 ---
 
 ## 8. Direction & Roadmap — Next Up
 
-1. **Playback smoothness for dense scenes**: `Player::state_at` clones every VGroup every frame — cache/incremental CPU evaluation is the remaining bottleneck (GPU side is cached).
-2. **Directional lighting / normal-based shading** for filled `surface3d`.
-3. **Camera anims in `mo preview`** (winit).
-4. **Undo/redo** in the IDE (code edits, explorer rename/delete, apply-to-code round-trips).
-5. **`.mcp.json` + agent loop hardening**: `assemble_scene` should use `parse_with_origins`; consider an MCP `apply_timings` tool.
-6. **CLI `render` of a project folder** (`mo render ~/mathoxide/foo` → `foo/master.moa`).
-7. **Polish candidates from this session**: hover docs for user symbols (object ids with their param list); go-to-def style click on import aliases; error squiggles per line instead of the top error bar.
+1. **Directional lighting / normal-based shading** for filled `surface3d`.
+2. **Camera anims in `mo preview`** (winit).
+3. **Undo/redo** in the IDE (code edits, explorer rename/delete, apply-to-code round-trips).
+4. **`.mcp.json` + agent loop hardening**: `assemble_scene` should use `parse_with_origins`; consider an MCP `apply_timings` tool.
+5. **CLI `render` of a project folder** (`mo render ~/mathoxide/foo` → `foo/master.moa`).
+6. **Polish candidates from this session**: hover docs for user symbols (object ids with their param list); go-to-def style click on import aliases; error squiggles per line instead of the top error bar.
 
 ### Instructions for Future Agents
 * **Hardware**: 16 GB RAM (use freely), iGPU ~128 MB VRAM (keep per-frame GPU uploads bounded).

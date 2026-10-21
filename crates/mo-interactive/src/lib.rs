@@ -1,5 +1,8 @@
 //! Interactive window: winit event loop + wgpu surface, pan/zoom/drag,
 //! playback controls (space = play/pause, arrows = scrub/step).
+//!
+//! Façade note: this file is the crate's single owner of winit — per the
+//! dependency-façade rule (HANDOFF.md), don't add `use winit::` elsewhere.
 
 use mo_core::camera::Camera;
 use mo_core::scene::{Player, Timeline};
@@ -27,12 +30,19 @@ struct App {
     drag: Option<DragState>,
     cursor: Option<(f32, f32)>,
     overrides: Overrides,
+    /// LRU memo of sampled states keyed by (epoch=0, time bits) — the
+    /// timeline is fixed here, so scrubbing back and forth becomes lookups.
+    memo: mo_core::FrameMemo,
+    /// Timeline index — the timeline never changes after startup.
+    index: mo_core::TimelineIndex,
+    /// Hash of the last presented frame's inputs; match = skip eval + GPU pass.
+    last_draw_sig: Option<u64>,
 }
 
 enum DragState {
     Pan { last: (f32, f32) },
-    /// Dragging a mobject: id + grab offset in scene coords.
-    Mob { id: String, offset: (f32, f32) },
+    /// Dragging a mobject: id + grab offset + base center captured at press.
+    Mob { id: String, offset: (f32, f32), base_center: (f32, f32) },
 }
 
 /// User overrides applied over the sampled timeline state (drag persistence).
@@ -43,6 +53,7 @@ struct Overrides {
 
 impl App {
     fn new(timeline: Timeline) -> Self {
+        let index = timeline.index();
         Self {
             timeline,
             window: None,
@@ -57,17 +68,39 @@ impl App {
             drag: None,
             cursor: None,
             overrides: Overrides::default(),
+            memo: mo_core::FrameMemo::new(16_384),
+            index,
+            last_draw_sig: None,
         }
     }
 
-    fn current_state(&self) -> HashMap<String, mo_core::vgroup::VGroup> {
-        let mut state = Player::state_at(&self.timeline, self.time);
+    /// Base (override-free) scene state, evaluated at most once per time
+    /// value; times seen before come from the memo.
+    fn base_state(&mut self) -> &HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>> {
+        let (timeline, index, time) = (&self.timeline, &self.index, self.time);
+        self.memo
+            .get_or_insert_with((0, time.to_bits()), || {
+                Player::state_at_indexed(timeline, index, time)
+            })
+    }
+
+    fn current_state(&mut self) -> HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>> {
+        // Arc makes the base clone a refcount bump; only overridden ids copy.
+        let mut state = self.base_state().clone();
         for (id, (dx, dy)) in &self.overrides.shifts {
-            if let Some(g) = state.get_mut(id) {
-                g.shift(glam::Vec3::new(*dx, *dy, 0.0));
+            if let Some(g) = state.get(id) {
+                let mut ng = g.as_ref().clone();
+                ng.shift(glam::Vec3::new(*dx, *dy, 0.0));
+                state.insert(id.clone(), std::sync::Arc::new(ng));
             }
         }
         state
+    }
+
+    fn request_frame(&self) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn camera(&self, width: u32, height: u32) -> Camera {
@@ -86,6 +119,31 @@ impl App {
         let w = size.width.max(1);
         let h = size.height.max(1);
         let cam = self.camera(w, h);
+
+        // Skip eval + GPU pass when nothing visual changed (paused, idle).
+        let mut hsh = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.time.to_bits().hash(&mut hsh);
+        w.hash(&mut hsh);
+        h.hash(&mut hsh);
+        cam.center.x.to_bits().hash(&mut hsh);
+        cam.center.y.to_bits().hash(&mut hsh);
+        cam.frame_height.to_bits().hash(&mut hsh);
+        let mut ov = 0u64;
+        for (id, (dx, dy)) in &self.overrides.shifts {
+            let mut eh = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut eh);
+            dx.to_bits().hash(&mut eh);
+            dy.to_bits().hash(&mut eh);
+            ov ^= eh.finish();
+        }
+        ov.hash(&mut hsh);
+        let sig = hsh.finish();
+        if self.last_draw_sig == Some(sig) {
+            return;
+        }
+        self.last_draw_sig = Some(sig);
+
         let state = self.current_state();
 
         let (Some(renderer), Some(surface), Some(config)) =
@@ -111,11 +169,11 @@ impl App {
         let _ = config;
     }
 
-    fn hit_test(&self, x: f64, y: f64) -> Option<(String, (f32, f32))> {
+    fn hit_test(&mut self, x: f64, y: f64) -> Option<(String, (f32, f32), (f32, f32))> {
         let size = self.window.as_ref()?.inner_size();
         let cam = self.camera(size.width, size.height);
         let scene = cam.screen_to_scene(x as f32, y as f32);
-        let state = Player::state_at(&self.timeline, self.time);
+        let state = self.base_state();
         // topmost = last drawn (ids collected; HashMap has no rev)
         let ids: Vec<&String> = state.keys().collect();
         for id in ids.into_iter().rev() {
@@ -127,7 +185,7 @@ impl App {
                 && scene.y <= mx[1];
             if inside {
                 let c = g.center();
-                return Some((id.clone(), (c.x - scene.x, c.y - scene.y)));
+                return Some((id.clone(), (c.x - scene.x, c.y - scene.y), (c.x, c.y)));
             }
         }
         None
@@ -194,6 +252,8 @@ impl ApplicationHandler for App {
                     surface.configure(renderer.device(), config);
                     renderer.resize(w, h);
                 }
+                self.last_draw_sig = None; // new surface: force a present
+                self.request_frame();
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
@@ -207,8 +267,10 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.draw();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                // Playing keeps the loop alive; paused waits for the next input
+                // event (each visual-changing handler calls request_frame).
+                if self.playing {
+                    self.request_frame();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -216,18 +278,25 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Space) => self.playing = !self.playing,
+                    PhysicalKey::Code(KeyCode::Space) => {
+                        self.playing = !self.playing;
+                        self.last_instant = std::time::Instant::now();
+                        self.request_frame();
+                    }
                     PhysicalKey::Code(KeyCode::ArrowRight) => {
                         self.playing = false;
                         self.time = (self.time + 1.0 / 30.0).min(self.timeline.duration());
+                        self.request_frame();
                     }
                     PhysicalKey::Code(KeyCode::ArrowLeft) => {
                         self.playing = false;
                         self.time = (self.time - 1.0 / 30.0).max(0.0);
+                        self.request_frame();
                     }
                     PhysicalKey::Code(KeyCode::Home) => {
                         self.playing = false;
                         self.time = 0.0;
+                        self.request_frame();
                     }
                     _ => {}
                 }
@@ -236,8 +305,8 @@ impl ApplicationHandler for App {
                 let Some(pos) = self.cursor else { return };
                 match st {
                     ElementState::Pressed => {
-                        if let Some((id, off)) = self.hit_test(pos.0 as f64, pos.1 as f64) {
-                            self.drag = Some(DragState::Mob { id, offset: off });
+                        if let Some((id, off, base_center)) = self.hit_test(pos.0 as f64, pos.1 as f64) {
+                            self.drag = Some(DragState::Mob { id, offset: off, base_center });
                         } else {
                             self.drag = Some(DragState::Pan { last: pos });
                         }
@@ -261,47 +330,36 @@ impl ApplicationHandler for App {
                             self.cam_offset.0 += b.x - a.x;
                             self.cam_offset.1 += b.y - a.y;
                         }
-                        DragState::Mob { id, offset } => {
+                        // Base center is captured once at press — no per-move
+                        // scene re-evaluation.
+                        DragState::Mob { id, offset, base_center } => {
                             let s = cam.screen_to_scene(cur.0, cur.1);
-                            let bx = base_center_x(&self.timeline, &id, self.time);
-                            let by = base_center_y(&self.timeline, &id, self.time);
                             let e = self.overrides.shifts.entry(id.clone()).or_insert((0.0, 0.0));
-                            e.0 = s.x + offset.0 - bx;
-                            e.1 = s.y + offset.1 - by;
+                            e.0 = s.x + offset.0 - base_center.0;
+                            e.1 = s.y + offset.1 - base_center.1;
                         }
                     }
+                    self.request_frame();
                 }
                 let _ = prev;
             }
             WindowEvent::MouseWheel { delta: MouseScrollDelta::LineDelta(_, y), .. } => {
                 self.zoom = (self.zoom * (1.0 + y * 0.1)).clamp(0.05, 20.0);
+                self.request_frame();
             }
             WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(p), .. } => {
                 self.zoom = (self.zoom * (1.0 + p.y as f32 * 0.005)).clamp(0.05, 20.0);
+                self.request_frame();
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, _loop: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+        if self.playing {
+            self.request_frame();
         }
     }
-}
-
-fn base_center_x(tl: &Timeline, id: &str, t: f32) -> f32 {
-    Player::state_at(tl, t)
-        .get(id)
-        .map(|g| g.center().x)
-        .unwrap_or(0.0)
-}
-
-fn base_center_y(tl: &Timeline, id: &str, t: f32) -> f32 {
-    Player::state_at(tl, t)
-        .get(id)
-        .map(|g| g.center().y)
-        .unwrap_or(0.0)
 }
 
 /// Open an interactive window playing `timeline`. Blocks until closed.

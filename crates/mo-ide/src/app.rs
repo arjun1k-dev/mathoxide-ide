@@ -5,7 +5,9 @@ use crate::inspector::{InspectorAction, InspectorPanel};
 use crate::timeline::TimelinePanel;
 use crate::viewport::ViewportPanel;
 use crate::watcher::FileWatcher;
-use eframe::egui::{self, Color32};
+use crate::ext::eframe;
+use crate::ext::egui::{self, Color32};
+use crate::ext::egui_wgpu;
 use mo_core::camera::Camera;
 use mo_core::scene::{Player, Timeline};
 use mo_render::Renderer;
@@ -26,6 +28,15 @@ pub struct MathOxideApp {
 
     timeline: Option<Timeline>,
     play_origins: Vec<mo_dsl::PlayOrigin>,
+    /// Bumped on every timeline replacement (recompile, import, open file);
+    /// invalidates the state cache and viewport frame signature.
+    timeline_epoch: u64,
+    /// LRU memo of sampled scene states keyed by (epoch, time bits) — one
+    /// evaluation per unseen frame max, reused by inspector + viewport;
+    /// scrub revisits become lookups. Entries share VGroups via Arc.
+    frame_memo: mo_core::FrameMemo,
+    /// Cached `TimelineIndex` keyed by timeline epoch.
+    index_cache: Option<(u64, mo_core::TimelineIndex)>,
     camera: Camera,
     current_time: f32,
     selected_mobject: Option<String>,
@@ -38,6 +49,9 @@ pub struct MathOxideApp {
     fps: f32,
     frame_count: u32,
     fps_timer: Instant,
+    /// Pending auto-compile trigger (debounced — a full parse per keystroke
+    /// is wasted work; 200ms of idle is imperceptible).
+    compile_timer: Option<Instant>,
 
     // Status toaster / notification
     status_message: Option<(String, Instant)>,
@@ -123,6 +137,9 @@ impl MathOxideApp {
             watcher,
             timeline,
             play_origins,
+            timeline_epoch: 0,
+            frame_memo: mo_core::FrameMemo::new(16_384),
+            index_cache: None,
             camera,
             current_time: 0.0,
             selected_mobject: None,
@@ -131,6 +148,7 @@ impl MathOxideApp {
             fps: 60.0,
             frame_count: 0,
             fps_timer: Instant::now(),
+            compile_timer: None,
             status_message: Some(("MathOxide Studio ready — pair programming environment active".into(), Instant::now())),
         };
         if let Some(p) = actual_path {
@@ -145,6 +163,44 @@ impl MathOxideApp {
         self.status_message = Some((msg.into(), Instant::now()));
     }
 
+    fn set_timeline(&mut self, tl: Option<Timeline>) {
+        self.timeline_epoch += 1;
+        self.timeline = tl;
+    }
+
+    /// Full DSL reparse (incl. imports from disk) + error surfacing.
+    fn recompile(&mut self) {
+        let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
+        self.play_origins = origins;
+        if let Some(t) = tl {
+            self.set_timeline(Some(t));
+        }
+        self.editor_panel.set_error(err);
+    }
+
+    /// One scene evaluation per frame max — shared by inspector and viewport.
+    /// Backed by the FrameMemo LRU: times seen before (scrub back, loop,
+    /// replay) come straight from the cache. Takes fields separately so
+    /// callers keep disjoint borrows of the rest.
+    fn eval_state_cached<'a>(
+        memo: &'a mut mo_core::FrameMemo,
+        index_cache: &'a mut Option<(u64, mo_core::TimelineIndex)>,
+        timeline: &'a Option<Timeline>,
+        time: f32,
+        epoch: u64,
+    ) -> &'a HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>> {
+        memo.get_or_insert_with((epoch, time.to_bits()), || match timeline {
+            Some(tl) => {
+                if !matches!(index_cache, Some((ep, _)) if *ep == epoch) {
+                    *index_cache = Some((epoch, tl.index()));
+                }
+                let idx = &index_cache.as_ref().unwrap().1;
+                Player::state_at_indexed(tl, idx, time)
+            }
+            None => HashMap::new(),
+        })
+    }
+
     pub fn open_file(&mut self, path: PathBuf) {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Some(proj) = crate::assets::project_of(&path, &self.asset_panel.project_path) {
@@ -155,7 +211,7 @@ impl MathOxideApp {
             self.editor_panel.is_dirty = false;
             let (tl, origins, err) = compile_code_in(&content, &path.parent().unwrap_or(std::path::Path::new(".")));
                 self.play_origins = origins;
-            self.timeline = tl;
+            self.set_timeline(tl);
             self.editor_panel.set_error(err);
             self.overrides.clear();
             self.current_time = 0.0;
@@ -278,13 +334,13 @@ impl MathOxideApp {
     }
 
     pub fn reload_from_disk(&mut self) {
-        if let Some(path) = &self.file_path {
-            if let Ok(content) = std::fs::read_to_string(path) {
+        if let Some(path) = self.file_path.clone() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
                 self.editor_panel.code = content.clone();
                 self.editor_panel.is_dirty = false;
                 let (tl, origins, err) = compile_code_in(&content, &path.parent().unwrap_or(std::path::Path::new(".")));
                 self.play_origins = origins;
-                self.timeline = tl;
+                self.set_timeline(tl);
                 self.editor_panel.set_error(err);
                 self.set_status(format!("Reloaded {}", path.display()));
             }
@@ -653,7 +709,7 @@ impl eframe::App for MathOxideApp {
                                         let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
                 self.play_origins = origins;
                                         if let Some(t) = tl {
-                                            self.timeline = Some(t);
+                                            self.set_timeline(Some(t));
                                         }
                                         self.editor_panel.set_error(err);
                                         self.editor_panel.is_dirty = true;
@@ -696,7 +752,7 @@ impl eframe::App for MathOxideApp {
                         let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
                         self.play_origins = origins;
                         if let Some(t) = tl {
-                            self.timeline = Some(t);
+                            self.set_timeline(Some(t));
                         }
                         self.editor_panel.set_error(err);
                         self.editor_panel.is_dirty = true;
@@ -723,7 +779,7 @@ impl eframe::App for MathOxideApp {
                         if self.file_path.as_deref() == Some(path.as_path()) {
                             self.file_path = None;
                             self.watcher = None;
-                            self.timeline = None;
+                            self.set_timeline(None);
                             self.set_status("File deleted — editor cleared");
                         } else {
                             self.set_status("Deleted");
@@ -754,14 +810,19 @@ impl eframe::App for MathOxideApp {
                 let (code_changed, save_req) = self.editor_panel.show(ui);
                 if save_req {
                     self.save_current_file();
+                    // Saving is explicit intent — flush any pending debounce now.
+                    if self.compile_timer.take().is_some() && self.editor_panel.auto_compile {
+                        self.recompile();
+                    }
                 }
                 if code_changed && self.editor_panel.auto_compile {
-                    let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
-                self.play_origins = origins;
-                    if let Some(t) = tl {
-                        self.timeline = Some(t);
+                    self.compile_timer = Some(Instant::now());
+                }
+                if let Some(t0) = self.compile_timer {
+                    if t0.elapsed() >= std::time::Duration::from_millis(200) {
+                        self.compile_timer = None;
+                        self.recompile();
                     }
-                    self.editor_panel.set_error(err);
                 }
             });
 
@@ -774,15 +835,17 @@ impl eframe::App for MathOxideApp {
                     .exact_height(300.0)
                     .resizable(false)
                     .show_inside(ui, |ui| {
-                        let current_state = if let Some(tl) = &self.timeline {
-                            Player::state_at(tl, self.current_time)
-                        } else {
-                            HashMap::new()
-                        };
+                        let current_state = Self::eval_state_cached(
+                            &mut self.frame_memo,
+                            &mut self.index_cache,
+                            &self.timeline,
+                            self.current_time,
+                            self.timeline_epoch,
+                        );
                         let inspector_action = InspectorPanel::show(
                             ui,
                             self.timeline.as_ref(),
-                            &current_state,
+                            current_state,
                             &mut self.selected_mobject,
                             &mut self.overrides,
                             &mut self.camera,
@@ -796,7 +859,7 @@ impl eframe::App for MathOxideApp {
                                 let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &self.compile_base_dir());
                                 self.play_origins = origins;
                                 if let Some(t) = tl {
-                                    self.timeline = Some(t);
+                                    self.set_timeline(Some(t));
                                 }
                                 self.editor_panel.set_error(err);
                                 self.editor_panel.is_dirty = true;
@@ -823,7 +886,7 @@ impl eframe::App for MathOxideApp {
                                                             let (tl, origins, err) = compile_code_in(&self.editor_panel.code, &base_dir);
                                                             self.play_origins = origins;
                                                             if let Some(t) = tl {
-                                                                self.timeline = Some(t);
+                                                                self.set_timeline(Some(t));
                                                             }
                                                             self.editor_panel.set_error(err);
                                                             self.set_status(format!(
@@ -849,6 +912,14 @@ impl eframe::App for MathOxideApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(Color32::from_rgb(0x05, 0x00, 0x1A)))
                     .show_inside(ui, |ui| {
+                        let base_state = Self::eval_state_cached(
+                            &mut self.frame_memo,
+                            &mut self.index_cache,
+                            &self.timeline,
+                            self.current_time,
+                            self.timeline_epoch,
+                        );
+                        let epoch = self.timeline_epoch;
                         self.viewport_panel.show(
                             ui,
                             &self.render_state,
@@ -858,6 +929,8 @@ impl eframe::App for MathOxideApp {
                             &mut self.camera,
                             &mut self.selected_mobject,
                             &mut self.overrides,
+                            base_state,
+                            epoch,
                             self.fps,
                         );
                     });

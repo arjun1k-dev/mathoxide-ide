@@ -21,4 +21,5 @@ notify = { workspace = true }
 glam = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+image = { workspace = true }
 rfd = { workspace = true }

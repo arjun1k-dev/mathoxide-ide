@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, Stroke, Vec2};
+use crate::ext::egui::{self, Color32, CursorIcon, Pos2, Rect, Stroke, Vec2};
 use mo_core::anim::TimedAnim;
 use mo_core::scene::{Stmt, Timeline};
 
@@ -68,7 +68,7 @@ struct Block {
 impl TimelinePanel {
     pub fn show(
         &mut self,
-        ui: &mut eframe::egui::Ui,
+        ui: &mut egui::Ui,
         timeline: Option<&mut Timeline>,
         origins: &[mo_dsl::PlayOrigin],
         current_time: &mut f32,

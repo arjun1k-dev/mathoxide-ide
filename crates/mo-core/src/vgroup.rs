@@ -134,17 +134,19 @@ impl VGroup {
         let a = a.clamp(0.0, 1.0);
         let b = b.clamp(a, 1.0);
         let mut out = VGroup::new();
-        let curves: Vec<[Vec3; 3]> = self.curves().collect();
-        let total = curves.len() as f32;
+        let total_curves = self.curve_count();
+        let total = total_curves as f32;
         if total == 0.0 || a >= b {
             return out;
         }
         let start_curve = (a * total).floor() as usize;
-        let end_curve = ((b * total).ceil() as usize).min(curves.len());
+        let end_curve = ((b * total).ceil() as usize).min(total_curves);
         if start_curve >= end_curve {
             return out;
         }
-        for (i, &[p0, p1, p2]) in curves.iter().enumerate().take(end_curve).skip(start_curve) {
+        for (i, [p0, p1, p2]) in
+            self.curves().enumerate().skip(start_curve).take(end_curve - start_curve)
+        {
             let f0 = if i == start_curve { (a * total - i as f32).max(0.0) } else { 0.0 };
             let f1 = if i + 1 == end_curve { (b * total - i as f32).min(1.0) } else { 1.0 };
             let [q0, q1, q2] = partial_quadratic(&[p0, p1, p2], f0, f1);
@@ -189,7 +191,6 @@ impl VGroup {
 
     pub fn scale(&mut self, s: f32, about: Vec3) {
         for p in &mut self.points {
-            p.point = (Vec3::from(p.point) - about * s + about).to_array();
             let q = Vec3::from(p.point);
             p.point = (about + (q - about) * s).to_array();
         }
@@ -445,5 +446,20 @@ mod tests {
         let mut scratch = g.clone();
         scratch.interpolate(&orig, &orig, 0.5);
         assert_eq!(scratch, orig);
+    }
+
+    #[test]
+    fn scale_about_point_preserves_center() {
+        let mut g = VGroup::new();
+        g.start_subpath(vec3(1.0, 2.0, 0.0));
+        g.add_curve(vec3(3.0, 2.0, 0.0), vec3(2.0, 4.0, 0.0));
+        let c = g.center();
+        g.scale(0.5, c);
+        let c2 = g.center();
+        assert!((c2.x - c.x).abs() < 1e-5, "center.x drifted: {c2} vs {c}");
+        assert!((c2.y - c.y).abs() < 1e-5, "center.y drifted: {c2} vs {c}");
+        // extents halve about the center
+        let (mn, mx) = g.bounds();
+        assert!(((mx[0] - mn[0]) - 1.0).abs() < 1e-5, "width should halve: {}", mx[0] - mn[0]);
     }
 }

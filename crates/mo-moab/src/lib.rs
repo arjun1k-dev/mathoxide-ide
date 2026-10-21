@@ -27,7 +27,7 @@ struct Bundle {
     timeline: Timeline,
     /// Baked geometry per object name at the end state (inspectable without
     /// re-running anything).
-    final_state: std::collections::HashMap<String, mo_core::vgroup::VGroup>,
+    final_state: std::collections::HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>>,
     meta: Meta,
 }
 
@@ -64,7 +64,7 @@ pub fn compile(src: &str) -> Result<Vec<u8>, MoabError> {
 }
 
 /// Open .moab bytes back into an editable bundle.
-pub fn open(bytes: &[u8]) -> Result<(Timeline, std::collections::HashMap<String, mo_core::vgroup::VGroup>, Meta), MoabError> {
+pub fn open(bytes: &[u8]) -> Result<(Timeline, std::collections::HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>>, Meta), MoabError> {
     if bytes.len() < 8 || &bytes[..4] != MAGIC {
         return Err(MoabError::BadMagic);
     }
@@ -80,7 +80,7 @@ pub fn open(bytes: &[u8]) -> Result<(Timeline, std::collections::HashMap<String,
 /// Re-serialize after edits (re-export path).
 pub fn save(
     timeline: &Timeline,
-    final_state: &std::collections::HashMap<String, mo_core::vgroup::VGroup>,
+    final_state: &std::collections::HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>>,
     meta: &Meta,
 ) -> Result<Vec<u8>, MoabError> {
     let body = postcard::to_allocvec(&Bundle {

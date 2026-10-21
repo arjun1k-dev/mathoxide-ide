@@ -13,7 +13,7 @@ pub mod math;
 pub mod svg;
 
 pub use camera::{Camera, FrameUniforms};
-pub use scene::{Player, Timeline, Stmt};
+pub use scene::{FrameMemo, Player, Timeline, Stmt, TimelineIndex};
 pub use vgroup::{VmPoint, VGroup};
 pub use rate::RateFn;
 pub use axes::Axes;
@@ -23,3 +23,4 @@ pub use svg::{parse_svg, render_math};
 pub use nalgebra;
 pub use ndarray;
 pub use num_complex;
+pub use glam;

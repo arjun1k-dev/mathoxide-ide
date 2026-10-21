@@ -2297,6 +2297,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "glam 0.29.3",
+ "image",
  "mo-core",
  "mo-dsl",
  "mo-moab",

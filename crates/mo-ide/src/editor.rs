@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, FontId, TextFormat};
+use crate::ext::egui::{self, Color32, FontId, TextFormat};
 
 /// Highlighted DSL tokens for the `.moa` language.
 pub fn highlight_moa(ctx: &egui::Context, text: &str) -> egui::text::LayoutJob {

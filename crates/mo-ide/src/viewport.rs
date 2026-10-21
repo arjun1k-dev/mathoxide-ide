@@ -1,4 +1,6 @@
-use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+use crate::ext::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+use crate::ext::egui_wgpu;
+use crate::ext::wgpu;
 use mo_core::camera::Camera;
 use mo_core::scene::{Player, Timeline};
 use mo_render::Renderer;
@@ -11,6 +13,59 @@ pub struct ViewportPanel {
     is_panning: bool,
     is_orbiting: bool,
     drag_mob_offset: (f32, f32),
+    /// Hash of the last rendered frame's inputs; equal hash = skip eval + GPU pass.
+    last_draw_sig: Option<u64>,
+    /// Cached `has_camera_anims` scan, invalidated by timeline epoch.
+    cam_anims: (u64, bool),
+    /// Shifted copies of overridden objects, keyed by (base Arc ptr, offset
+    /// bits). The entry keeps its base Arc alive so pointer identity stays
+    /// sound; cleared on timeline change and capped against playback-drag
+    /// growth.
+    shift_cache:
+        HashMap<(usize, u32, u32), (std::sync::Arc<mo_core::vgroup::VGroup>, std::sync::Arc<mo_core::vgroup::VGroup>)>,
+    shift_cache_epoch: u64,
+}
+
+/// Frame signature: everything that changes what the offscreen target shows.
+/// Changing any component produces a different hash; a match with the previous
+/// frame means the target already holds the right pixels.
+fn frame_sig(
+    current_time: f32,
+    timeline_epoch: u64,
+    cam: &Camera,
+    target_w: u32,
+    target_h: u32,
+    overrides: &HashMap<String, (f32, f32)>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    current_time.to_bits().hash(&mut h);
+    timeline_epoch.hash(&mut h);
+    target_w.hash(&mut h);
+    target_h.hash(&mut h);
+    for f in [
+        cam.center.x,
+        cam.center.y,
+        cam.center.z,
+        cam.frame_height,
+        cam.fov,
+        cam.phi,
+        cam.theta,
+        cam.gamma,
+    ] {
+        f.to_bits().hash(&mut h);
+    }
+    // Order-independent override hash (HashMap iteration order is unstable).
+    let mut ov = 0u64;
+    for (id, (dx, dy)) in overrides {
+        let mut eh = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut eh);
+        dx.to_bits().hash(&mut eh);
+        dy.to_bits().hash(&mut eh);
+        ov ^= eh.finish();
+    }
+    ov.hash(&mut h);
+    h.finish()
 }
 
 impl ViewportPanel {
@@ -31,6 +86,10 @@ impl ViewportPanel {
             is_panning: false,
             is_orbiting: false,
             drag_mob_offset: (0.0, 0.0),
+            last_draw_sig: None,
+            cam_anims: (0, false),
+            shift_cache: HashMap::new(),
+            shift_cache_epoch: 0,
         }
     }
 
@@ -44,6 +103,8 @@ impl ViewportPanel {
         camera: &mut Camera,
         selected_mobject: &mut Option<String>,
         overrides: &mut HashMap<String, (f32, f32)>,
+        base_state: &HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>>,
+        timeline_epoch: u64,
         fps: f32,
     ) {
         let avail_size = ui.available_size();
@@ -81,25 +142,25 @@ impl ViewportPanel {
             );
         }
 
-        // Evaluate scene state at current time
-        let mut state = if let Some(tl) = timeline {
-            Player::state_at(tl, current_time)
-        } else {
-            HashMap::new()
-        };
-
         // Animated camera (camera.orbit / camera.zoom / camera.move_to) overrides
         // the interactive base camera while the timeline defines camera motion.
-        let has_camera_anims = timeline.map(|tl| {
-            tl.stmts.iter().any(|s| {
-                matches!(s, mo_core::scene::Stmt::Play(a) if matches!(
-                    a.anim,
-                    mo_core::anim::Animation::CameraOrbit { .. }
-                        | mo_core::anim::Animation::CameraZoom { .. }
-                        | mo_core::anim::Animation::CameraMoveTo { .. }
-                ))
-            })
-        }).unwrap_or(false);
+        // The stmts scan is t-invariant — cache it per timeline epoch.
+        let has_camera_anims = if self.cam_anims.0 == timeline_epoch {
+            self.cam_anims.1
+        } else {
+            let v = timeline.map(|tl| {
+                tl.stmts.iter().any(|s| {
+                    matches!(s, mo_core::scene::Stmt::Play(a) if matches!(
+                        a.anim,
+                        mo_core::anim::Animation::CameraOrbit { .. }
+                            | mo_core::anim::Animation::CameraZoom { .. }
+                            | mo_core::anim::Animation::CameraMoveTo { .. }
+                    ))
+                })
+            }).unwrap_or(false);
+            self.cam_anims = (timeline_epoch, v);
+            v
+        };
         let cam_owned = if has_camera_anims {
             Player::camera_at(timeline.unwrap(), current_time, camera)
         } else {
@@ -107,19 +168,58 @@ impl ViewportPanel {
         };
         let cam: &Camera = &cam_owned;
 
-        // Apply visual shift overrides
-        for (id, (dx, dy)) in overrides.iter() {
-            if let Some(g) = state.get_mut(id) {
-                g.shift(glam::Vec3::new(*dx, *dy, 0.0));
-            }
-        }
+        // Skip eval + GPU pass entirely when nothing that affects the target changed
+        // (paused scrub, idle, static camera). The texture from the last pass persists.
+        let sig = frame_sig(current_time, timeline_epoch, cam, renderer.width(), renderer.height(), overrides);
+        let skip_render = self.last_draw_sig == Some(sig);
+        self.last_draw_sig = Some(sig);
 
-        // Render scene to offscreen target
-        let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viewport scene encoder"),
-        });
-        renderer.draw_scene_pass(&state, cam, &mut encoder);
-        renderer.queue().submit(Some(encoder.finish()));
+        // Scene state: reuse the app's pre-evaluated base; only materialize a
+        // shifted copy when we are actually going to draw. Arc makes the map
+        // clone a refcount bump; overridden ids reuse cached shifted copies.
+        let mut shifted_state;
+        let state: &HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>> = if skip_render {
+            base_state
+        } else {
+            if self.shift_cache_epoch != timeline_epoch {
+                self.shift_cache.clear();
+                self.shift_cache_epoch = timeline_epoch;
+            }
+            shifted_state = base_state.clone();
+            for (id, (dx, dy)) in overrides.iter() {
+                if let Some(g) = shifted_state.get(id) {
+                    let key = (
+                        std::sync::Arc::as_ptr(g) as usize,
+                        dx.to_bits(),
+                        dy.to_bits(),
+                    );
+                    let shifted = match self.shift_cache.get(&key) {
+                        Some((_, s)) => s.clone(),
+                        None => {
+                            let mut ng = g.as_ref().clone();
+                            ng.shift(glam::Vec3::new(*dx, *dy, 0.0));
+                            let s = std::sync::Arc::new(ng);
+                            if self.shift_cache.len() > 128 {
+                                self.shift_cache.clear();
+                            }
+                            self.shift_cache.insert(key, (g.clone(), s.clone()));
+                            s
+                        }
+                    };
+                    shifted_state.insert(id.clone(), shifted);
+                }
+            }
+            &shifted_state
+        };
+
+        if !skip_render {
+            // Render scene to offscreen target
+            let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewport scene encoder"),
+            });
+            renderer.draw_scene_pass(state, cam, &mut encoder);
+            renderer.queue().submit(Some(encoder.finish()));
+        }
 
         // Center canvas inside available panel area
         let offset_x = ((avail_size.x - canvas_w) * 0.5).max(padding);
@@ -179,7 +279,10 @@ impl ViewportPanel {
                 let mut clicked_id = None;
                 for (id, group) in state.iter() {
                     let (min, max) = group.bounds();
-                    if sc.x >= min[0] && sc.x <= max[0] && sc.y >= min[1] && sc.y <= max[1] {
+                    // On skip frames `state` is the unshifted base — compensate
+                    // for drag overrides so hit-tests match what's on screen.
+                    let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
+                    if sc.x >= min[0] + odx && sc.x <= max[0] + odx && sc.y >= min[1] + ody && sc.y <= max[1] + ody {
                         clicked_id = Some(id.clone());
                         break;
                     }
@@ -207,11 +310,14 @@ impl ViewportPanel {
                 } else if let Some(id) = selected_mobject {
                     if let Some(group) = state.get(id) {
                         let (min, max) = group.bounds();
-                        if sc.x >= min[0] && sc.x <= max[0] && sc.y >= min[1] && sc.y <= max[1] {
+                        let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
+                        if sc.x >= min[0] + odx && sc.x <= max[0] + odx && sc.y >= min[1] + ody && sc.y <= max[1] + ody {
                             self.is_dragging_mob = true;
                             self.is_panning = false;
                             self.is_orbiting = false;
-                            let c = group.center();
+                            let mut c = group.center();
+                            c.x += odx;
+                            c.y += ody;
                             self.drag_mob_offset = (c.x - sc.x, c.y - sc.y);
                         } else {
                             self.is_panning = true;
@@ -242,15 +348,17 @@ impl ViewportPanel {
                     camera.center.y -= p2.y - p1.y;
                 } else if self.is_dragging_mob {
                     if let Some(id) = selected_mobject {
-                        if let Some(tl) = timeline {
-                            let base = Player::state_at(tl, current_time);
-                            let base_center = base.get(id).map(|g| g.center()).unwrap_or(glam::Vec3::ZERO);
-                            let target_x = sc.x + self.drag_mob_offset.0;
-                            let target_y = sc.y + self.drag_mob_offset.1;
-                            let shift_x = target_x - base_center.x;
-                            let shift_y = target_y - base_center.y;
-                            overrides.insert(id.clone(), (shift_x, shift_y));
-                        }
+                        // base_state is exactly `Player::state_at(tl, current_time)`
+                        // pre-evaluated by the app — no second evaluation here.
+                        let base_center = base_state
+                            .get(id)
+                            .map(|g| g.center())
+                            .unwrap_or(glam::Vec3::ZERO);
+                        let target_x = sc.x + self.drag_mob_offset.0;
+                        let target_y = sc.y + self.drag_mob_offset.1;
+                        let shift_x = target_x - base_center.x;
+                        let shift_y = target_y - base_center.y;
+                        overrides.insert(id.clone(), (shift_x, shift_y));
                     }
                 }
             }
@@ -263,7 +371,12 @@ impl ViewportPanel {
         // Draw Selection Bounding Box on top of Viewport
         if let Some(id) = selected_mobject {
             if let Some(group) = state.get(id) {
-                let (min, max) = group.bounds();
+                let (mut min, mut max) = group.bounds();
+                let (odx, ody) = overrides.get(id).copied().unwrap_or((0.0, 0.0));
+                min[0] += odx;
+                min[1] += ody;
+                max[0] += odx;
+                max[1] += ody;
                 let p_min = cam.scene_to_screen(min[0], min[1]);
                 let p_max = cam.scene_to_screen(max[0], max[1]);
 

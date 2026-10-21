@@ -161,9 +161,10 @@ fn render_video(
     let mut stdin = ffmpeg.stdin.take().unwrap();
 
     let total = (duration * fps as f32).ceil() as u32;
+    let index = tl.index();
     for frame in 0..total {
         let t = frame as f32 / fps as f32;
-        let state = mo_core::scene::Player::state_at(tl, t);
+        let state = mo_core::scene::Player::state_at_indexed(tl, &index, t);
         // Camera animations (camera.orbit/zoom/move_to) animate the camera over time.
         let frame_cam = mo_core::scene::Player::camera_at(tl, t, camera);
         let img = renderer.render_with_camera(&state, &frame_cam);

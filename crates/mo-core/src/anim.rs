@@ -7,7 +7,8 @@ use glam::Vec3;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Animation {
     /// Blend the whole mobject toward `target` (Transform / MoveTo in manim).
-    Transform { id: String, target: VGroup },
+    /// Arc-shared so per-frame evaluation clones a refcount, not point data.
+    Transform { id: String, target: std::sync::Arc<VGroup> },
     /// Fade in: opacity 0->1 (plus optional shift), mobject ends visible.
     FadeIn { id: String, shift: Option<Vec3> },
     FadeOut { id: String, shift: Option<Vec3> },
@@ -316,7 +317,7 @@ mod tests {
         let from = geom::circle(1.0, Vec3::ZERO, [0.0; 4], crate::color::BLUE, 4.0);
         let mut to = from.clone();
         to.shift(Vec3::new(3.0, 0.0, 0.0));
-        let anim = TimedAnim::new(Animation::Transform { id: "c".into(), target: to.clone() }, 2.0, "smooth");
+        let anim = TimedAnim::new(Animation::Transform { id: "c".into(), target: std::sync::Arc::new(to.clone()) }, 2.0, "smooth");
         let mid = sample(&anim, &from, &to, 1.0).unwrap();
         let cx = mid.center().x;
         assert!(cx > 1.0 && cx < 2.0, "mid x = {cx}");

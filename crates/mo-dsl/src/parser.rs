@@ -1101,7 +1101,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
     // transform(c, c2) resolves against objects declared so far.
     let mut declared: std::collections::HashMap<String, VGroup> = Default::default();
     let mut axes_map: std::collections::HashMap<String, mo_core::Axes> = Default::default();
-    let mut tl = Timeline { stmts: Vec::new() };
+    let mut tl = Timeline::default();
     let mut origins: Vec<PlayOrigin> = Vec::new();
 
     let mut referenced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1128,7 +1128,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
             RawStmt::Decl { kind, name, params } => {
                 let obj = build_object(&kind, &name, &params, &mut axes_map)?;
                 declared.insert(name.clone(), obj.clone());
-                tl.stmts.push(Stmt::Decl { id: name, obj });
+                tl.stmts.push(Stmt::Decl { id: name, obj: std::sync::Arc::new(obj) });
             }
             RawStmt::Play { name, args, run_time, rate } => {
                 let run_time = run_time.unwrap_or(1.0);
@@ -1203,10 +1203,12 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                         }
                     }
                     ("transform", [id, to]) | ("replacementTransform", [id, to]) => {
-                        let target = declared
-                            .get(to)
-                            .ok_or_else(|| format!("transform target `{to}` not declared yet"))?
-                            .clone();
+                        let target = std::sync::Arc::new(
+                            declared
+                                .get(to)
+                                .ok_or_else(|| format!("transform target `{to}` not declared yet"))?
+                                .clone(),
+                        );
                         Animation::Transform { id: id.clone(), target }
                     }
                     (other, _) => return Err(format!("unknown animation `{other}`")),
@@ -1298,7 +1300,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                     let mut composite = VGroup::new();
                     for stmt in &imported_tl.0.stmts {
                         if let Stmt::Decl { obj, .. } = stmt {
-                            let mut o = obj.clone();
+                            let mut o = obj.as_ref().clone();
                             if shift_vec != Vec3::ZERO {
                                 o.shift(shift_vec);
                             }
@@ -1307,7 +1309,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                     }
                     declared.insert(a.clone(), composite.clone());
                     if alias_referenced {
-                        tl.stmts.push(Stmt::Decl { id: a.clone(), obj: composite });
+                        tl.stmts.push(Stmt::Decl { id: a.clone(), obj: std::sync::Arc::new(composite) });
                     }
                 }
 
@@ -1315,14 +1317,14 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                     match stmt {
                         Stmt::Decl { id, mut obj } => {
                             if shift_vec != Vec3::ZERO {
-                                obj.shift(shift_vec);
+                                std::sync::Arc::make_mut(&mut obj).shift(shift_vec);
                             }
                             let target_name = if let Some(a) = &alias {
                                 format!("{a}_{id}")
                             } else {
                                 id.clone()
                             };
-                            declared.insert(target_name.clone(), obj.clone());
+                            declared.insert(target_name.clone(), obj.as_ref().clone());
                             if (!alias_referenced && referenced_ids.contains(&target_name)) || has_internal_plays {
                                 tl.stmts.push(Stmt::Decl { id: target_name, obj });
                             }
@@ -1330,7 +1332,7 @@ fn lower(raws: Vec<RawStmt>, base_dir: &std::path::Path) -> Result<(Timeline, Ve
                         Stmt::Play(mut anim) => {
                             if shift_vec != Vec3::ZERO {
                                 if let Animation::Transform { ref mut target, .. } = anim.anim {
-                                    target.shift(shift_vec);
+                                    std::sync::Arc::make_mut(target).shift(shift_vec);
                                 }
                             }
                             if let Some(a) = &alias {

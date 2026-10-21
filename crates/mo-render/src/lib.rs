@@ -6,12 +6,15 @@
 
 mod pipelines;
 
-pub use pipelines::{GpuPointRecord, MobjectUniforms, Renderer};
+pub use pipelines::{
+    GpuCommandEncoder, GpuDevice, GpuPointRecord, GpuQueue, GpuTextureFormat, GpuTextureView,
+    MobjectUniforms, Renderer,
+};
 
 /// Render a scene state to an RGBA8 image.
 pub fn render_state_to_image(
     renderer: &Renderer,
-    state: &std::collections::HashMap<String, mo_core::vgroup::VGroup>,
+    state: &std::collections::HashMap<String, std::sync::Arc<mo_core::vgroup::VGroup>>,
 ) -> image::RgbaImage {
     renderer.render(state)
 }
@@ -29,7 +32,7 @@ mod tests {
         let mut state = HashMap::new();
 
         let c = geom::circle(1.5, Vec3::ZERO, [0.345, 0.768, 0.867, 0.5], [1.0, 1.0, 1.0, 1.0], 4.0);
-        state.insert("circle".to_string(), c);
+        state.insert("circle".to_string(), std::sync::Arc::new(c));
 
         let img = renderer.render(&state);
         assert_eq!(img.width(), 320);
@@ -53,7 +56,7 @@ mod tests {
         let mut state = HashMap::new();
 
         let t = mo_core::text::text("MO", 1.5);
-        state.insert("title".to_string(), t);
+        state.insert("title".to_string(), std::sync::Arc::new(t));
 
         let img = renderer.render(&state);
         assert_eq!(img.width(), 320);

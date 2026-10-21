@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32};
+use crate::ext::egui::{self, Color32};
 use mo_core::camera::Camera;
 use mo_core::scene::Timeline;
 use mo_core::vgroup::VGroup;
@@ -16,7 +16,7 @@ impl InspectorPanel {
     pub fn show(
         ui: &mut egui::Ui,
         timeline: Option<&Timeline>,
-        current_state: &HashMap<String, VGroup>,
+        current_state: &HashMap<String, std::sync::Arc<VGroup>>,
         selected_mobject: &mut Option<String>,
         overrides: &mut HashMap<String, (f32, f32)>,
         camera: &mut Camera,

@@ -3,20 +3,98 @@
 use crate::anim::{self, Animation, TimedAnim};
 use crate::vgroup::VGroup;
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// A timeline statement — what the DSL compiles to. Serializable for .moab.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Stmt {
-    /// Declare (or redeclare) a named mobject.
-    Decl { id: String, obj: VGroup },
+    /// Declare (or redeclare) a named mobject. Shared via Arc so per-frame
+    /// evaluation clones refcounts, not point data.
+    Decl { id: String, obj: Arc<VGroup> },
     Play(TimedAnim),
     Wait(f32),
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Timeline {
     pub stmts: Vec<Stmt>,
+    /// Memo for `duration` (O(stmts) sum) — recomputed only once per timeline.
+    #[serde(skip)]
+    duration_cache: std::sync::OnceLock<f32>,
+}
+
+impl Clone for Timeline {
+    fn clone(&self) -> Self {
+        Self { stmts: self.stmts.clone(), duration_cache: std::sync::OnceLock::new() }
+    }
+}
+
+/// t-invariant data extracted from a Timeline once and reused across frames.
+/// Build with `Timeline::index`, pass to `Player::state_at_indexed`.
+#[derive(Default)]
+pub struct TimelineIndex {
+    /// Pre-resolved Decl preamble: ungated objects (no intro anim), visible
+    /// from t = 0. Cloned as every sample's starting state — Arc refcount
+    /// bumps instead of per-frame re-inserts and point-data equality scans.
+    decl_base: HashMap<String, Arc<VGroup>>,
+    /// Decls gated behind an intro anim: inserted once t >= their intro time.
+    intro_decls: Vec<(String, Arc<VGroup>, f32)>,
+    /// Final geometry of completed Rotate/Scale/Shift anims, keyed by stmt
+    /// index — deterministic per stmt, so computed once and Arc-shared.
+    baked_final: std::cell::RefCell<HashMap<usize, Arc<VGroup>>>,
+}
+
+/// LRU memo of sampled scene states, keyed by (timeline epoch, time bits).
+/// Values are Arc-shared maps, so each entry costs only map/key overhead —
+/// the point data is shared with the Timeline's Decl/transform objects. Size
+/// it to hold every frame of a long timeline; playback and scrub revisits
+/// then become pure lookups.
+pub struct FrameMemo {
+    map: HashMap<(u64, u32), (HashMap<String, Arc<VGroup>>, u64)>,
+    cap: usize,
+    tick: u64,
+}
+
+impl FrameMemo {
+    pub fn new(cap: usize) -> Self {
+        Self { map: HashMap::new(), cap, tick: 0 }
+    }
+
+    /// Sampled state for `key`, evaluating via `f` on a miss.
+    pub fn get_or_insert_with(
+        &mut self,
+        key: (u64, u32),
+        f: impl FnOnce() -> HashMap<String, Arc<VGroup>>,
+    ) -> &HashMap<String, Arc<VGroup>> {
+        self.tick += 1;
+        let tick = self.tick;
+        if !self.map.contains_key(&key) {
+            self.map.insert(key, (f(), tick));
+            if self.map.len() > self.cap {
+                self.evict_oldest();
+            }
+        } else {
+            self.map.get_mut(&key).unwrap().1 = tick;
+        }
+        &self.map.get(&key).unwrap().0
+    }
+
+    /// Drop ~1/8 of the entries (least recently touched first) in one pass —
+    /// amortized, so full-memo frames don't pay an O(n) scan per insert.
+    fn evict_oldest(&mut self) {
+        let batch = (self.cap / 8).max(1);
+        let mut by_age: Vec<(u64, (u64, u32))> =
+            self.map.iter().map(|(k, (_, t))| (*t, *k)).collect();
+        by_age.sort_unstable();
+        for (_, k) in by_age.into_iter().take(batch) {
+            self.map.remove(&k);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 pub struct Spanned {
@@ -27,19 +105,20 @@ pub struct Spanned {
 
 impl Timeline {
     pub fn duration(&self) -> f32 {
-        let mut d = 0.0;
-        for s in &self.stmts {
-            d += match s {
-                Stmt::Play(a) => a.run_time,
-                Stmt::Wait(t) => *t,
-                Stmt::Decl { .. } => 0.0,
-            };
-        }
-        d
+        *self.duration_cache.get_or_init(|| {
+            self.stmts
+                .iter()
+                .map(|s| match s {
+                    Stmt::Play(a) => a.run_time,
+                    Stmt::Wait(t) => *t,
+                    Stmt::Decl { .. } => 0.0,
+                })
+                .sum()
+        })
     }
 
     /// Return all declared named mobjects and their initial geometries.
-    pub fn initial_objects(&self) -> HashMap<String, VGroup> {
+    pub fn initial_objects(&self) -> HashMap<String, Arc<VGroup>> {
         let mut m = HashMap::new();
         for s in &self.stmts {
             if let Stmt::Decl { id, obj } = s {
@@ -47,6 +126,76 @@ impl Timeline {
             }
         }
         m
+    }
+
+    /// Precompute the t-invariant evaluation preamble. Cheap relative to
+    /// point data; do this once per timeline, not once per frame.
+    pub fn index(&self) -> TimelineIndex {
+        let mut idx = TimelineIndex::default();
+        let mut played_ids: HashSet<String> = HashSet::new();
+        let mut intro_times: HashMap<String, f32> = HashMap::new();
+        let mut transform_targets: Vec<Arc<VGroup>> = Vec::new();
+        let mut time_cur = 0.0;
+        for s in &self.stmts {
+            match s {
+                Stmt::Play(ta) => {
+                    let id = ta.anim.target_id().to_string();
+                    played_ids.insert(id.clone());
+                    if matches!(
+                        ta.anim,
+                        Animation::ShowCreation { .. }
+                            | Animation::FadeIn { .. }
+                            | Animation::Grow { .. }
+                            | Animation::SpinInFromNothing { .. }
+                            | Animation::DrawBorderThenFill { .. }
+                    ) {
+                        intro_times.entry(id).or_insert(time_cur);
+                    }
+                    if let Animation::Transform { target, .. } = &ta.anim {
+                        transform_targets.push(target.clone());
+                    }
+                    time_cur += ta.run_time;
+                }
+                Stmt::Wait(dur) => {
+                    time_cur += dur;
+                }
+                Stmt::Decl { .. } => {}
+            }
+        }
+
+        // Resolve the Decl preamble once: per-id last declaration wins, and
+        // the pure-target test (a point-data equality scan) moves off the
+        // per-frame path entirely.
+        enum Gate {
+            Always,
+            After(f32),
+        }
+        let mut resolved: HashMap<&str, (Arc<VGroup>, Gate)> = HashMap::new();
+        for s in &self.stmts {
+            if let Stmt::Decl { id, obj } = s {
+                let gate = match intro_times.get(id) {
+                    Some(&it) => Gate::After(it),
+                    None => Gate::Always,
+                };
+                resolved.insert(id.as_str(), (obj.clone(), gate));
+            }
+        }
+        for (id, (obj, gate)) in resolved {
+            let is_pure_target = !played_ids.contains(id)
+                && transform_targets.iter().any(|tg| tg == &obj);
+            if is_pure_target {
+                continue;
+            }
+            match gate {
+                Gate::Always => {
+                    idx.decl_base.insert(id.to_string(), obj);
+                }
+                Gate::After(t) => {
+                    idx.intro_decls.push((id.to_string(), obj, t));
+                }
+            }
+        }
+        idx
     }
 
     /// Return timed animations with their absolute start time and duration.
@@ -74,62 +223,31 @@ impl Timeline {
 pub struct Player;
 
 impl Player {
-    /// State of all visible mobjects at time `t`.
-    pub fn state_at(tl: &Timeline, t: f32) -> HashMap<String, VGroup> {
-        let mut intro_times: HashMap<String, f32> = HashMap::new();
-        let mut played_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut transform_targets: Vec<VGroup> = Vec::new();
+    /// State of all visible mobjects at time `t`. Builds the timeline index
+    /// on the fly; hot loops should use `state_at_indexed` with a reused index.
+    pub fn state_at(tl: &Timeline, t: f32) -> HashMap<String, Arc<VGroup>> {
+        let idx = tl.index();
+        Player::state_at_indexed(tl, &idx, t)
+    }
 
-        let mut time_cur = 0.0;
-        for s in &tl.stmts {
-            match s {
-                Stmt::Play(ta) => {
-                    let id = ta.anim.target_id().to_string();
-                    played_ids.insert(id.clone());
-                    if matches!(
-                        ta.anim,
-                        Animation::ShowCreation { .. }
-                            | Animation::FadeIn { .. }
-                            | Animation::Grow { .. }
-                            | Animation::SpinInFromNothing { .. }
-                            | Animation::DrawBorderThenFill { .. }
-                    ) {
-                        intro_times.entry(id).or_insert(time_cur);
-                    }
-                    if let Animation::Transform { target, .. } = &ta.anim {
-                        transform_targets.push(target.clone());
-                    }
-                    time_cur += ta.run_time;
-                }
-                Stmt::Wait(dur) => {
-                    time_cur += dur;
-                }
-                Stmt::Decl { .. } => {}
-            }
-        }
-
-        let mut state: HashMap<String, VGroup> = HashMap::new();
-        for stmt in &tl.stmts {
-            if let Stmt::Decl { id, obj } = stmt {
-                // Pure transform targets (never played directly, match a transform target)
-                // are shape definitions only, not initial scene objects.
-                let is_pure_target = !played_ids.contains(id) && transform_targets.iter().any(|tg| tg == obj);
-                if is_pure_target {
-                    continue;
-                }
-
-                if let Some(&intro_t) = intro_times.get(id) {
-                    if t >= intro_t {
-                        state.insert(id.clone(), obj.clone());
-                    }
-                } else {
-                    state.insert(id.clone(), obj.clone());
-                }
+    /// State of all visible mobjects at time `t`, reusing a precomputed index.
+    pub fn state_at_indexed(
+        tl: &Timeline,
+        idx: &TimelineIndex,
+        t: f32,
+    ) -> HashMap<String, Arc<VGroup>> {
+        // Decl preamble resolved at index time: clone bumps refcounts, then
+        // only intro-gated objects are inserted conditionally.
+        let mut state: HashMap<String, Arc<VGroup>> = idx.decl_base.clone();
+        for (id, obj, intro_t) in &idx.intro_decls {
+            if t >= *intro_t {
+                state.insert(id.clone(), obj.clone());
             }
         }
 
         let mut t_cursor = 0.0;
-        for stmt in &tl.stmts {
+        let empty = VGroup::new();
+        for (stmt_i, stmt) in tl.stmts.iter().enumerate() {
             match stmt {
                 Stmt::Decl { .. } => {}
                 Stmt::Wait(dur) => {
@@ -146,23 +264,16 @@ impl Player {
                         break;
                     }
                     match &ta.anim {
-                        Animation::Transform { .. } => {
-                            let target = if let Some(Animation::Transform { target, .. }) =
-                                Some(&ta.anim)
-                            {
-                                target.clone()
-                            } else {
-                                unreachable!()
-                            };
+                        Animation::Transform { target, .. } => {
                             if t >= end {
-                                state.insert(id, target);
-                            } else {
-                                let snapshot = state.get(&id).cloned().unwrap_or_default();
-                                let mut scratch = snapshot.clone();
-                                if let Some(out) = anim::sample(ta, &snapshot, &target, t - start) {
-                                    scratch = out;
-                                }
-                                state.insert(id, scratch);
+                                state.insert(id, target.clone());
+                            } else if let Some(out) = anim::sample(
+                                ta,
+                                state.get(&id).map(Arc::as_ref).unwrap_or(&empty),
+                                target,
+                                t - start,
+                            ) {
+                                state.insert(id, Arc::new(out));
                             }
                             t_cursor = end;
                             if t < end {
@@ -170,16 +281,12 @@ impl Player {
                             }
                         }
                         Animation::FadeIn { .. } => {
-                            let target = state.get(&id).cloned().unwrap_or_default();
-                            if t >= end {
-                                state.insert(id, target);
-                            } else {
-                                let snapshot = VGroup::new();
-                                let mut scratch = target.clone();
-                                if let Some(out) = anim::sample(ta, &snapshot, &target, t - start) {
-                                    scratch = out;
+                            if t < end {
+                                let target =
+                                    state.get(&id).map(Arc::as_ref).unwrap_or(&empty);
+                                if let Some(out) = anim::sample(ta, &empty, target, t - start) {
+                                    state.insert(id, Arc::new(out));
                                 }
-                                state.insert(id, scratch);
                             }
                             t_cursor = end;
                             if t < end {
@@ -189,13 +296,10 @@ impl Player {
                         Animation::FadeOut { .. } | Animation::ShrinkToCenter { .. } | Animation::Uncreate { .. } => {
                             if t >= end {
                                 state.remove(&id);
-                            } else {
-                                let target = state.get(&id).cloned().unwrap_or_default();
-                                let mut scratch = target.clone();
+                            } else if let Some(target) = state.get(&id).cloned() {
                                 if let Some(out) = anim::sample(ta, &target, &target, t - start) {
-                                    scratch = out;
+                                    state.insert(id, Arc::new(out));
                                 }
-                                state.insert(id, scratch);
                             }
                             t_cursor = end;
                             if t < end {
@@ -213,35 +317,53 @@ impl Player {
                         | Animation::Flash { .. }
                         | Animation::Scale { .. }
                         | Animation::Shift { .. } => {
-                            let target = state.get(&id).cloned().unwrap_or_default();
                             if t >= end {
-                                if let Animation::Rotate { angle, .. } = &ta.anim {
-                                    let mut m = target.clone();
-                                    let c = m.center();
-                                    m.rotate_z(*angle, c);
+                                // Final geometry is deterministic per stmt — bake
+                                // once and Arc-share on every later frame.
+                                if matches!(
+                                    &ta.anim,
+                                    Animation::Rotate { .. } | Animation::Scale { .. } | Animation::Shift { .. }
+                                ) {
+                                    let mut baked = idx.baked_final.borrow_mut();
+                                    let m = baked
+                                        .entry(stmt_i)
+                                        .or_insert_with(|| {
+                                            let mut m = state
+                                                .get(&id)
+                                                .map(|g| g.as_ref().clone())
+                                                .unwrap_or_else(VGroup::new);
+                                            match &ta.anim {
+                                                Animation::Rotate { angle, .. } => {
+                                                    let c = m.center();
+                                                    m.rotate_z(*angle, c);
+                                                }
+                                                Animation::Scale { factor, .. } => {
+                                                    let c = m.center();
+                                                    for p in &mut m.points {
+                                                        let q = Vec3::from(p.point);
+                                                        p.point = (c + (q - c) * factor).to_array();
+                                                    }
+                                                }
+                                                Animation::Shift { delta, .. } => {
+                                                    m.shift(*delta);
+                                                }
+                                                _ => unreachable!(),
+                                            }
+                                            Arc::new(m)
+                                        })
+                                        .clone();
+                                    drop(baked);
                                     state.insert(id, m);
-                                } else if let Animation::Scale { factor, .. } = &ta.anim {
-                                    let mut m = target.clone();
-                                    let c = m.center();
-                                    for p in &mut m.points {
-                                        let q = Vec3::from(p.point);
-                                        p.point = (c + (q - c) * factor).to_array();
-                                    }
-                                    state.insert(id, m);
-                                } else if let Animation::Shift { delta, .. } = &ta.anim {
-                                    let mut m = target.clone();
-                                    m.shift(*delta);
-                                    state.insert(id, m);
-                                } else {
-                                    state.insert(id, target);
                                 }
-                            } else {
-                                let snapshot = state.get(&id).cloned().unwrap_or_default();
-                                let mut scratch = snapshot.clone();
-                                if let Some(out) = anim::sample(ta, &snapshot, &target, t - start) {
-                                    scratch = out;
-                                }
-                                state.insert(id, scratch);
+                                // Other intro anims: the Decl pass already put the
+                                // final object in `state` — nothing to do.
+                            } else if let Some(out) = anim::sample(
+                                ta,
+                                state.get(&id).map(Arc::as_ref).unwrap_or(&empty),
+                                state.get(&id).map(Arc::as_ref).unwrap_or(&empty),
+                                t - start,
+                            ) {
+                                state.insert(id, Arc::new(out));
                             }
                             t_cursor = end;
                             if t < end {
@@ -336,10 +458,11 @@ mod tests {
         c2.shift(Vec3::new(2.0, 0.0, 0.0));
         Timeline {
             stmts: vec![
-                Stmt::Decl { id: "c".into(), obj: c1 },
-                Stmt::Play(crate::anim::TimedAnim::new(Animation::Transform { id: "c".into(), target: c2 }, 2.0, "linear")),
+                Stmt::Decl { id: "c".into(), obj: std::sync::Arc::new(c1) },
+                Stmt::Play(crate::anim::TimedAnim::new(Animation::Transform { id: "c".into(), target: std::sync::Arc::new(c2) }, 2.0, "linear")),
                 Stmt::Wait(1.0),
             ],
+            duration_cache: std::sync::OnceLock::new(),
         }
     }
 

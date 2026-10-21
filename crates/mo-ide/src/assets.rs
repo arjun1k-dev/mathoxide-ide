@@ -220,8 +220,8 @@ impl AssetPanel {
         self.last_scan = Instant::now();
     }
 
-    pub fn show(&mut self, ui: &mut eframe::egui::Ui, current_file: Option<&Path>) -> AssetAction {
-        use eframe::egui::{self, Align, Layout, RichText, Color32};
+    pub fn show(&mut self, ui: &mut crate::ext::egui::Ui, current_file: Option<&Path>) -> AssetAction {
+        use crate::ext::egui::{self, Align, Layout, RichText, Color32};
         let mut action = AssetAction::None;
 
         // Auto-rescan: files created/deleted externally (MCP, CLI, file manager)
